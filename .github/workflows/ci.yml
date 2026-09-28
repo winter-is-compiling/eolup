@@ -1,0 +1,49 @@
+name: CI
+
+# Runs the fast, deterministic test suite (unit + provider + fixture tests) on
+# every push/PR. Deliberately does NOT run scripts/test-against-reference-repos.sh
+# here — that's a separate, slower, network-heavy layer with no fixed pass/fail
+# assertion by design. See TESTING.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Covers the "cross-platform checks" item from TESTING.md's manual-testing
+        # layer — .NET tooling behavior (build target resolution, MSBuild property
+        # evaluation) can differ subtly between Windows and Linux.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # 10.0.x for Rollforward's own projects; 8.0.x because every fixture is
+          # pinned to net8.0 as its starting state before remediation bumps it.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+          # No NuGet cache yet — that needs packages.lock.json files we don't
+          # generate today. Worth adding once build times actually justify it.
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        # Category!=Live: the one test that calls the real endoflife.date API runs in
+        # live-smoke.yml instead. A third-party service being briefly unreachable
+        # from a runner must not be able to turn this gate red (it did, twice).
+        run: dotnet test --no-build --configuration Release --verbosity normal --filter "Category!=Live"

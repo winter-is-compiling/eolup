@@ -1,0 +1,145 @@
+name: 'Rollforward'
+description: >
+  Fleet-wide framework EOL scanning and confidence-scored migration.
+  Thin wrapper around the Rollforward CLI — see ARCHITECTURE.md for why the
+  logic lives in the CLI and this adapter stays minimal.
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  command:
+    description: "Which Rollforward command to run: 'scan' or 'remediate'."
+    required: true
+    default: 'scan'
+  path:
+    description: >
+      Path to the project to scan/remediate. Defaults to the calling
+      workflow's own checkout root ($GITHUB_WORKSPACE) if not set.
+    required: false
+    default: ''
+  fail-on:
+    description: >
+      Which `remediate` verdicts should fail this step (exit code 2): 'none'
+      (default — Rollforward reports, you decide), 'blocked', or 'needs-review'
+      (anything short of HighConfidence). Ignored by `scan`.
+    required: false
+    default: 'none'
+  chain:
+    description: >
+      'true' to keep upgrading hop by hop (net6.0 -> net8.0 -> net10.0) while each
+      hop is HighConfidence, stopping at the first that isn't; the PR then covers
+      every high-confidence hop, one commit each. Default 'false': one hop per run.
+      Ignored by `scan`.
+    required: false
+    default: 'false'
+  version:
+    description: >
+      Which release's pre-built `rollforward` binary to use, e.g. 'v0.1.0' or
+      'latest'. Defaults to the release tag this Action is pinned to
+      (`uses: winter-is-compiling/rollforward@v0.1.0`). Pinned to a branch or a commit
+      instead, or if the download fails, the CLI is built from source.
+    required: false
+    default: ''
+
+outputs:
+  cli-source:
+    description: "'release' if a pre-built binary was used, 'source' if the CLI was built from source."
+    value: ${{ steps.cli.outputs.source }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        # Needed either way: Rollforward drives the real `dotnet build`/`dotnet test`
+        # of the project it upgrades.
+        dotnet-version: '10.0.x'
+
+    # A pre-built binary saves every run from compiling Rollforward itself.
+    # Anything short of a verified download falls back to building from source,
+    # so an unusual runner never breaks the step — it's only slower.
+    - name: Get the rollforward CLI
+      id: cli
+      shell: bash
+      env:
+        RF_VERSION: ${{ inputs.version }}
+        RF_ACTION_REF: ${{ github.action_ref }}
+        RF_REPO: ${{ github.action_repository || github.repository }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        fallback() {
+          echo "::notice::Building Rollforward from source ($1)."
+          echo "source=source" >> "$GITHUB_OUTPUT"
+          echo "path=" >> "$GITHUB_OUTPUT"
+          exit 0
+        }
+
+        version="$RF_VERSION"
+        if [ -z "$version" ] && [[ "$RF_ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          version="$RF_ACTION_REF"
+        fi
+        [ -n "$version" ] || fallback "not pinned to a release"
+
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64)     rid=linux-x64 ;;
+          Windows/X64)   rid=win-x64 ;;
+          macOS/ARM64)   rid=osx-arm64 ;;
+          macOS/X64)     rid=osx-x64 ;;
+          *)             fallback "no pre-built binary for $RUNNER_OS/$RUNNER_ARCH" ;;
+        esac
+
+        dir="$RUNNER_TEMP/rollforward-cli"
+        rm -rf "$dir" && mkdir -p "$dir"
+        tag_args=("$version"); [ "$version" = "latest" ] && tag_args=()
+        gh release download "${tag_args[@]}" --repo "$RF_REPO" --dir "$dir" \
+          --pattern "rollforward-$rid.*" --pattern SHA256SUMS \
+          || fallback "couldn't download release $version of $RF_REPO"
+
+        if command -v sha256sum > /dev/null; then sum=(sha256sum -c -); else sum=(shasum -a 256 -c -); fi
+        (cd "$dir" && grep " rollforward-$rid\." SHA256SUMS | "${sum[@]}") || fallback "checksum mismatch"
+
+        if [ "$rid" = "win-x64" ]; then
+          pwsh -NoProfile -Command "Expand-Archive -LiteralPath '$(cygpath -w "$dir/rollforward-$rid.zip")' -DestinationPath '$(cygpath -w "$dir")' -Force" \
+            || fallback "couldn't extract the archive"
+          exe="$dir/rollforward.exe"
+        else
+          tar -xzf "$dir/rollforward-$rid.tar.gz" -C "$dir" || fallback "couldn't extract the archive"
+          exe="$dir/rollforward"
+        fi
+
+        "$exe" --version || fallback "the downloaded binary didn't run"
+        echo "source=release" >> "$GITHUB_OUTPUT"
+        echo "path=$exe" >> "$GITHUB_OUTPUT"
+
+    - name: Run rollforward ${{ inputs.command }}
+      shell: bash
+      # Inputs go through env rather than being spliced into the script, so a
+      # crafted input value can't inject shell.
+      env:
+        RF_COMMAND: ${{ inputs.command }}
+        RF_PATH: ${{ inputs.path }}
+        RF_FAIL_ON: ${{ inputs.fail-on }}
+        RF_CHAIN: ${{ inputs.chain }}
+        RF_CLI: ${{ steps.cli.outputs.path }}
+      run: |
+        TARGET_PATH="$RF_PATH"
+        if [ -z "$TARGET_PATH" ]; then
+          TARGET_PATH="$GITHUB_WORKSPACE"
+        fi
+        EXTRA_ARGS=()
+        if [ "$RF_COMMAND" = "remediate" ]; then
+          EXTRA_ARGS+=(--fail-on "$RF_FAIL_ON")
+          if [ "$RF_CHAIN" = "true" ]; then
+            EXTRA_ARGS+=(--chain)
+          fi
+        fi
+        # github.action_path resolves to this repo checked out at whatever ref
+        # the caller pinned in `uses: winter-is-compiling/rollforward@<ref>` — no
+        # separate checkout of Rollforward's own source needed.
+        if [ -n "$RF_CLI" ]; then
+          "$RF_CLI" "$RF_COMMAND" "$TARGET_PATH" "${EXTRA_ARGS[@]}"
+        else
+          dotnet run --project "${{ github.action_path }}/src/Rollforward.Cli" -- "$RF_COMMAND" "$TARGET_PATH" "${EXTRA_ARGS[@]}"
+        fi

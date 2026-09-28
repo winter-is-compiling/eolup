@@ -1,0 +1,36 @@
+name: Self-test action adapter
+
+# Dogfoods action.yml against our own fixture-trivial, using the local action
+# (`uses: ./`) — proves the composite-action mechanics actually work (path
+# resolution, .NET setup, invoking the CLI via github.action_path) rather than
+# only ever being exercised by an external consumer for the first time.
+#
+# Deliberately only exercises `scan`, not `remediate`: remediate does a real
+# `git checkout -b` in the target path, and fixtures/ lives inside this repo's
+# own checkout — branching this repo's own ephemeral CI checkout works, but
+# adds a git-state wrinkle that isn't needed just to prove the adapter's
+# plumbing is correct.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Rollforward scan via the local action
+        uses: ./
+        with:
+          command: scan
+          path: fixtures/fixture-trivial
+        id: rf
+
+      # `uses: ./` isn't pinned to a release, so the Action must build from source
+      # and say so; the release-binary path is verified in release.yml.
+      - name: The Action reported building from source
+        run: test "${{ steps.rf.outputs.cli-source }}" = "source"

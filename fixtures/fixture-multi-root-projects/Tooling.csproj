@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    This project exists purely to sit alongside FixtureMultiRoot.slnx at the repo
+    root, mirroring a real pattern found via the eShopOnWeb manual test pass: a repo
+    with exactly one real solution plus one unrelated project file (there it was
+    docker-compose.dcproj) at its root, which makes plain `dotnet build <directory>`
+    fail with MSB1011 even though there's really only one solution that matters.
+    It's deliberately empty (and excludes src/**, which the SDK would otherwise
+    implicitly glob-include) since it isn't meant to be built — it's not referenced
+    by FixtureMultiRoot.slnx at all.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="src/**" />
+  </ItemGroup>
+
+</Project>

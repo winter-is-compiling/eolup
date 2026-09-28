@@ -1,0 +1,139 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds a self-contained, single-file `rollforward` for
+# each platform, smoke-tests the native ones, and publishes them as assets of the
+# GitHub release for that tag, with a SHA256SUMS file. The release notes come from
+# that version's section of CHANGELOG.md.
+#
+# The Action (action.yml) downloads these assets when a workflow pins it to a
+# release tag, instead of building Rollforward from source on every run.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - rid: linux-x64
+            os: ubuntu-latest
+            smoke: true
+          - rid: win-x64
+            os: windows-latest
+            smoke: true
+          # macOS binaries are built on macOS so the SDK can ad-hoc sign them —
+          # Apple Silicon refuses to run an unsigned executable.
+          - rid: osx-arm64
+            os: macos-latest
+            smoke: true
+          - rid: osx-x64
+            os: macos-latest
+            smoke: false   # the runner is arm64; x64 would only run under Rosetta
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish
+        shell: bash
+        run: |
+          dotnet publish src/Rollforward.Cli -c Release -r ${{ matrix.rid }} --self-contained \
+            -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=embedded \
+            -p:Version="${GITHUB_REF_NAME#v}" -o publish
+
+      - name: Smoke test
+        if: matrix.smoke
+        shell: bash
+        run: |
+          exe=publish/rollforward; [ -f publish/rollforward.exe ] && exe=publish/rollforward.exe
+          "$exe" --version | tee version.txt
+          grep -q "^${GITHUB_REF_NAME#v}" version.txt   # the binary reports the tag's version
+          "$exe" scan fixtures/fixture-trivial
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir dist
+          cp LICENSE publish/
+          if [ "${{ matrix.rid }}" = "win-x64" ]; then
+            (cd publish && 7z a -tzip ../dist/rollforward-${{ matrix.rid }}.zip rollforward.exe LICENSE > /dev/null)
+          else
+            tar -czf dist/rollforward-${{ matrix.rid }}.tar.gz -C publish rollforward LICENSE
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rollforward-${{ matrix.rid }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum rollforward-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/       { exit }
+            found                   { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for [$version]"
+            exit 1
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "Rollforward $GITHUB_REF_NAME" --notes-file notes.md
+          fi
+
+  # Proves the Action really downloads and runs the binary just published,
+  # rather than quietly falling back to building from source.
+  verify-action:
+    needs: release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan a fixture with the released binary
+        id: rf
+        uses: ./
+        with:
+          command: scan
+          path: fixtures/fixture-trivial
+          version: ${{ github.ref_name }}
+
+      - name: The Action used the release binary
+        shell: bash
+        run: |
+          echo "cli-source=${{ steps.rf.outputs.cli-source }}"
+          test "${{ steps.rf.outputs.cli-source }}" = "release"

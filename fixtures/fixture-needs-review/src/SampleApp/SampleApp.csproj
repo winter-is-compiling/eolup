@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    NewApiUsage.cs is excluded by default (SDK-style projects implicitly glob-include
+    all .cs files, so this Remove is what makes exclusion the default) and only
+    re-included once the project targets net10.0 — see NewApiUsage.cs for why.
+    Coupled to "net10.0" specifically because that's what the other fixtures already
+    assume endoflife.date currently resolves "next-lts from net8.0" to; if that
+    resolution ever changes, this condition needs updating alongside the others.
+  -->
+  <ItemGroup>
+    <Compile Remove="NewApiUsage.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <Compile Include="NewApiUsage.cs" />
+  </ItemGroup>
+
+</Project>

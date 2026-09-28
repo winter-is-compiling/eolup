@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="ServiceA/ServiceA.csproj" />
+  <Project Path="ServiceB/ServiceB.csproj" />
+</Solution>
