@@ -301,6 +301,26 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task ExistingRemediationBranch_IsNeverReused_AndTheCurrentBranchStaysUntouched()
+    {
+        // `git checkout -b` used to fail silently when rollforward/upgrade-to-10.0 already
+        // existed (an earlier run, a fetched remote branch), and the migration was then
+        // committed onto whatever branch the user was on.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var userBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        var before = await Git(path, "rev-parse", "HEAD");
+        await Git(path, "branch", "rollforward/upgrade-to-10.0");
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal("rollforward/upgrade-to-10.0-2", result.BranchName);
+        Assert.Equal(before, await Git(path, "rev-parse", userBranch));
+        Assert.Equal(before, await Git(path, "rev-parse", "rollforward/upgrade-to-10.0"));
+        Assert.Equal("1", await Git(path, "rev-list", "--count", $"{before}..{result.BranchName}"));
+    }
+
+    [Fact]
     public async Task NoTestProject_YieldsBlocked()
     {
         using var fixture = FixtureHarness.CopyToTemp("fixture-no-tests");

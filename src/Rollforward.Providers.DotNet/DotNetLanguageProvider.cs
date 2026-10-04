@@ -188,8 +188,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         var baseCommit = (await ProcessRunner.RunAsync("git", ["rev-parse", "HEAD"], projectPath, cancellationToken))
             .StandardOutput.Trim();
 
-        var branchName = $"rollforward/upgrade-to-{targetVersion}";
-        await ProcessRunner.RunAsync("git", $"checkout -b {branchName}", projectPath, cancellationToken);
+        var branchName = await CreateRemediationBranchAsync(projectPath, $"rollforward/upgrade-to-{targetVersion}", cancellationToken);
 
         var changedFiles = new HashSet<string>();
         foreach (var bump in projectsToBump)
@@ -262,6 +261,38 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
         return new RemediationOutcome(
             buildResult.Succeeded, testProjectExists, testsPassed, manualActionMarkers, branchName, coverage, testComparison);
+    }
+
+    /// <summary>
+    /// Creates and switches to the branch the migration is committed on, and returns its name.
+    /// The result of `git checkout -b` used to be ignored: when the branch already existed
+    /// (an earlier run, or one fetched from the remote) the command failed silently and the
+    /// migration was committed onto whatever branch the user was on — breaking the promise that
+    /// remediation never touches the current branch. So an existing name, local or on any
+    /// remote, is skipped in favour of "-2", "-3", ...; a checkout that still fails is an error.
+    /// </summary>
+    private static async Task<string> CreateRemediationBranchAsync(
+        string projectPath, string baseName, CancellationToken cancellationToken)
+    {
+        var refs = await ProcessRunner.RunAsync(
+            "git", ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"], projectPath, cancellationToken);
+        var taken = refs.StandardOutput
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(r => r.StartsWith("refs/heads/", StringComparison.Ordinal)
+                ? r["refs/heads/".Length..]
+                : r["refs/remotes/".Length..][(r["refs/remotes/".Length..].IndexOf('/') + 1)..]) // drop "<remote>/"
+            .ToHashSet(StringComparer.Ordinal);
+
+        var name = baseName;
+        for (var suffix = 2; taken.Contains(name); suffix++)
+            name = $"{baseName}-{suffix}";
+
+        var checkout = await ProcessRunner.RunAsync("git", ["checkout", "-b", name], projectPath, cancellationToken);
+        if (!checkout.Succeeded)
+            throw new RollforwardUserException(
+                $"Could not create the branch '{name}' for the migration: {checkout.StandardError.Trim()} Nothing was changed.");
+
+        return name;
     }
 
     /// <summary>One `dotnet test` run: pass/fail, per-test failures, and where its result files are.</summary>

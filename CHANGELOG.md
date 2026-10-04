@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Fixed: if the remediation branch (`rollforward/upgrade-to-N`) already existed, locally or on a remote, `remediate` failed to create it without saying so and committed the migration onto the branch you were on. It now picks a free name (`-2`, `-3`, …), and a branch that still can't be created is an error before anything changes.
+
 ## [0.1.0] — 2026-09-28
 
 First release. **Pre-alpha, .NET only** — useful today on real repos, but expect rough edges.
