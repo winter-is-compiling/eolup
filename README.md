@@ -5,7 +5,9 @@
 
 **Stop paying a full sprint's worth of story points for a one-line framework bump.**
 
-Rollforward scans a .NET project for outdated, end-of-life framework versions, tells you exactly how risky upgrading actually is, and — for the low-risk majority — opens a pre-validated, ready-to-merge pull request. The hard cases get routed to a human with a clear explanation of what needs judgment.
+Rollforward is a CLI and GitHub Action that upgrades end-of-life .NET target frameworks (for example `net8.0` → `net10.0`) and opens a pull request only when your own tests prove the upgrade is safe.
+
+It scans a .NET project for outdated, end-of-life framework versions, tells you exactly how risky upgrading actually is, and — for the low-risk majority — opens a pre-validated, ready-to-merge pull request. The hard cases get routed to a human with a clear explanation of what needs judgment.
 
 > **Status: early-stage, pre-alpha, .NET only.** Works today, tested against real projects — but v0 scans one repo per invocation (no fleet-wide dashboard yet) and only bumps `<TargetFramework>` directly (it does not rewrite obsolete API usage). See [ROADMAP.md](ROADMAP.md) for what's built vs. planned, and [VISION.md](VISION.md) for the reasoning behind this project.
 
@@ -62,6 +64,32 @@ Reasons:
 **Coverage.** While your tests run, Rollforward measures per-file line coverage of the code the migration recompiles (using [Coverlet](https://github.com/coverlet-coverage/coverlet), which the default xunit/NUnit/MSTest templates already reference as `coverlet.collector`). Tests that execute none of it → `Blocked`; coverage below `minCoverage` (default 50%) → `NeedsReview`, naming the least-covered files. If your test projects don't reference `coverlet.collector`, coverage can't be measured: the verdict is unchanged and says so explicitly.
 
 > **Safety, in plain terms**: your source code never leaves your machine or CI runner — nothing is uploaded anywhere. `remediate` always works on a new branch, never your current one. Even on `HighConfidence`, nothing merges automatically — a PR is opened for you to review like any other. Full reasoning in [SECURITY.md](SECURITY.md).
+
+## See it in action
+
+[`rollforward-demo-fleetops`](https://github.com/winter-is-compiling/rollforward-demo-fleetops) is a small multi-project solution (domain, application, Azure adapters, minimal API; xUnit, Moq, Azure SDKs) on `net8.0`. Running `rollforward remediate` on it opened [this pull request](https://github.com/winter-is-compiling/rollforward-demo-fleetops/pull/1):
+
+```
+Verdict: HighConfidence
+Branch:  rollforward/upgrade-to-10
+Reasons:
+  - Build succeeded, existing tests passed (line coverage 82.7%), no manual-action markers — safe to auto-approve.
+```
+
+The safety net matters as much as the happy path. While building this demo, an earlier version of its API tests pinned `Microsoft.AspNetCore.Mvc.Testing` to 8.0.x. After the bump, two tests failed on net10, so Rollforward returned `NeedsReview` and named the failing tests instead of opening a PR. The demo now makes that package follow the target framework, and the gap is tracked in [#1](https://github.com/winter-is-compiling/rollforward/issues/1).
+
+## How it compares
+
+|  | Rollforward | [dotnet-bumper](https://github.com/martincostello/dotnet-bumper) | [GitHub Copilot `@upgrade`](https://learn.microsoft.com/en-us/dotnet/core/porting/github-copilot-upgrade/how-to-upgrade-with-github-copilot) |
+|---|---|---|---|
+| Form | CLI + GitHub Action | .NET global tool | Agent in Visual Studio, VS Code, Copilot CLI |
+| Upgrades `TargetFramework` | yes, one hop at a time (`--chain` to continue) | yes | yes |
+| Also updates packages, `global.json`, Dockerfiles | not yet ([#1](https://github.com/winter-is-compiling/rollforward/issues/1)) | yes | assessed and planned as part of its workflow |
+| Runs your tests | always; build + tests + coverage decide the verdict | optional (`--test`) | part of its guided or automatic workflow |
+| Opens a PR | automatically, only on `HighConfidence` | not part of the tool as documented | works on a branch you choose up front |
+| Hard cases | `NeedsReview` / `Blocked`, with reasons | best-effort, review the changes | interactive, you steer |
+
+Rollforward's bet is narrow on purpose: do the mechanical bump, let your tests decide, and stay quiet unless the result is safe. If you want an interactive, AI-assisted migration, or package and Dockerfile updates today, the tools above fit better. This table reflects each project's public docs at the time of writing; corrections are welcome.
 
 ## Configuration
 
