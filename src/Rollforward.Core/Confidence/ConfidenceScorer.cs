@@ -29,21 +29,25 @@ public static class ConfidenceScorer
         CoverageReport? coverage = null,
         int minCoveragePercent = DefaultMinCoveragePercent,
         TestComparison? testComparison = null,
-        IReadOnlyList<string>? frameworkAlignedPackages = null)
+        IReadOnlyList<string>? frameworkAlignedPackages = null,
+        IReadOnlyList<string>? packagesBumped = null,
+        IReadOnlyList<string>? unhelpfulPackageBumps = null)
     {
         RemediationResult Result(ConfidenceVerdict verdict, List<string> reasons) =>
             new(verdict, reasons, buildSucceeded, testsPassed, testProjectExists, manualActionMarkers, branchName, coverage, testComparison);
 
+        var packages = new PackageSignals(frameworkAlignedPackages, unhelpfulPackageBumps);
+
         if (!buildSucceeded)
             return Result(ConfidenceVerdict.Blocked,
-                WithPackageHint(["Build failed after remediation — cannot verify the change is safe."], frameworkAlignedPackages));
+                WithPackageHint(["Build failed after remediation — cannot verify the change is safe."], packages));
 
         if (!testProjectExists)
             return Result(ConfidenceVerdict.Blocked,
                 ["No test project found in the solution — cannot verify the change is safe."]);
 
         if (testsPassed == false)
-            return ScoreFailedTests(testComparison, frameworkAlignedPackages, Result);
+            return ScoreFailedTests(testComparison, packages, Result);
 
         if (coverage is { CoveredLines: 0 })
             return Result(ConfidenceVerdict.Blocked,
@@ -71,14 +75,34 @@ public static class ConfidenceScorer
         }
 
         if (reasons.Count > 0)
+        {
+            AddBumpedPackages(reasons, packagesBumped);
             return Result(ConfidenceVerdict.NeedsReview, reasons);
+        }
 
         var coverageNote = coverage is null
             ? "line coverage was not measured"
             : $"line coverage {Pct(coverage.Percent)}";
-        return Result(ConfidenceVerdict.HighConfidence,
-            [$"Build succeeded, existing tests passed ({coverageNote}), no manual-action markers — safe to auto-approve."]);
+        return Result(ConfidenceVerdict.HighConfidence, AddBumpedPackages(
+            [$"Build succeeded, existing tests passed ({coverageNote}), no manual-action markers — safe to auto-approve."],
+            packagesBumped));
     }
+
+    /// <summary>
+    /// The opt-in package bump was kept because it made the migration pass. The verdict is judged as usual —
+    /// the same build and tests approved it — but the PR must say what else moved besides the framework.
+    /// </summary>
+    private static List<string> AddBumpedPackages(List<string> reasons, IReadOnlyList<string>? bumped)
+    {
+        if (bumped is { Count: > 0 })
+            reasons.Add(
+                "The framework bump alone broke the build or tests, so these framework-aligned packages were also moved to the new " +
+                $"framework's major (its own commit; review it like any dependency update): {Names(bumped)}.");
+        return reasons;
+    }
+
+    /// <summary>What the package detection and the opt-in bump found, as the scoring rules need it.</summary>
+    private sealed record PackageSignals(IReadOnlyList<string>? Stale, IReadOnlyList<string>? BumpDidNotHelp);
 
     private const int FailedTestsToName = 5;
 
@@ -87,12 +111,18 @@ public static class ConfidenceScorer
     /// major (found by a net8.0 → net10.0 demo whose Mvc.Testing 8.0.x broke on net10).
     /// Named as a hint when the build or tests failed, never as a reason on its own.
     /// </summary>
-    private static List<string> WithPackageHint(List<string> reasons, IReadOnlyList<string>? packages)
+    private static List<string> WithPackageHint(List<string> reasons, PackageSignals packages)
     {
-        if (packages is { Count: > 0 })
+        // The opt-in bump already tried these; say so, so nobody repeats the experiment by hand.
+        if (packages.BumpDidNotHelp is { Count: > 0 })
+            reasons.Add(
+                "Rollforward tried moving these framework-aligned packages to the new framework's major and re-running, " +
+                $"but that did not fix the failure, so the change was dropped and the branch holds only the framework bump: {Names(packages.BumpDidNotHelp)}.");
+
+        if (packages.Stale is { Count: > 0 })
             reasons.Add(
                 "These packages usually version with the framework and are still on the old major — a common cause of " +
-                $"post-upgrade failures, worth checking whether they need bumping to match the new framework: {Names(packages)}.");
+                $"post-upgrade failures, worth checking whether they need bumping to match the new framework: {Names(packages.Stale)}.");
         return reasons;
     }
 
@@ -104,20 +134,20 @@ public static class ConfidenceScorer
     /// so it is decided here, next to the rule that decides blame, not re-derived elsewhere.
     /// </summary>
     private static RemediationResult ScoreFailedTests(
-        TestComparison? comparison, IReadOnlyList<string>? stalePackages,
+        TestComparison? comparison, PackageSignals packages,
         Func<ConfidenceVerdict, List<string>, RemediationResult> result)
     {
         if (comparison is null)
             return result(ConfidenceVerdict.NeedsReview, WithPackageHint(
                 ["Existing test suite failed after remediation — needs human judgment on whether this is a real regression."],
-                stalePackages));
+                packages));
 
         if (comparison.BaselinePassed)
             return result(ConfidenceVerdict.NeedsReview, WithPackageHint(
                 [comparison.FailuresIdentified && comparison.NewFailures.Count > 0
                     ? $"The test suite passed before the migration and fails after it — a likely regression. Newly failing: {Names(comparison.NewFailures)}."
                     : "The test suite passed before the migration and fails after it — a likely regression."],
-                stalePackages));
+                packages));
 
         if (!comparison.FailuresIdentified)
             return result(ConfidenceVerdict.Blocked,
@@ -128,7 +158,7 @@ public static class ConfidenceScorer
             return result(ConfidenceVerdict.NeedsReview, WithPackageHint(
                 [$"{comparison.NewFailures.Count} test(s) that passed before the migration now fail — a likely regression: {Names(comparison.NewFailures)}.",
                  $"{comparison.AlreadyFailing.Count} other failing test(s) were already failing before the migration: {Names(comparison.AlreadyFailing)}."],
-                stalePackages));
+                packages));
 
         return result(ConfidenceVerdict.NeedsReview,
             [$"No test broke because of the migration: all {comparison.AlreadyFailing.Count} failing test(s) were already failing on the untouched code " +

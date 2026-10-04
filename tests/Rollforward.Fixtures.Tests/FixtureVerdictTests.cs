@@ -16,8 +16,8 @@ namespace Rollforward.Fixtures.Tests;
 /// </summary>
 public class FixtureVerdictTests
 {
-    private static RollforwardEngine CreateEngine() =>
-        new(new RecordedEolClient(), new DotNetLanguageProvider());
+    private static RollforwardEngine CreateEngine(bool bumpPackages = false) =>
+        new(new RecordedEolClient(), new DotNetLanguageProvider(bumpPackages));
 
     [Fact]
     public async Task Trivial_YieldsHighConfidence()
@@ -400,6 +400,66 @@ public class FixtureVerdictTests
         Assert.Contains(result.Reasons, r =>
             r.Contains("still on the old major") &&
             r.Contains("Microsoft.Extensions.Options 8.0.0 (src/SampleApp/SampleApp.csproj)"));
+    }
+
+    [Fact]
+    public async Task BumpPackages_FixesAnUpgradeThatTheStalePackageBroke()
+    {
+        // The real failure, on real dotnet/NuGet/git: after the bump to net10.0 the in-memory test server
+        // from Microsoft.AspNetCore.Mvc.Testing 8.x answers HTTP 500. With the opt-in on, Rollforward moves
+        // that package to 10.x as its own commit, the retry passes, and the verdict says what else moved.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-stale-package-fixed-by-bump");
+        var path = fixture.Path;
+        var before = await Git(path, "rev-parse", "HEAD");
+
+        var result = await CreateEngine(bumpPackages: true).RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.HighConfidence, result.Verdict);
+        Assert.True(result.TestsPassed);
+        Assert.Contains(result.Reasons, r =>
+            r.Contains("were also moved to the new framework's major") &&
+            r.Contains("Microsoft.AspNetCore.Mvc.Testing 8.0.11 → 10.") &&
+            r.Contains("src/WebApp.Tests/WebApp.Tests.csproj"));
+        Assert.Equal(
+            ["Rollforward: align framework packages to 10.x", "Rollforward: upgrade target framework to net10.0"],
+            (await Git(path, "log", "--format=%s", $"{before}..{result.BranchName}")).Split('\n', StringSplitOptions.TrimEntries));
+        var project = await Git(path, "show", $"{result.BranchName}:src/WebApp.Tests/WebApp.Tests.csproj");
+        Assert.Matches("Microsoft.AspNetCore.Mvc.Testing\" Version=\"10\\.\\d+\\.\\d+\"", project);
+    }
+
+    [Fact]
+    public async Task WithoutTheOptIn_OnlyTheFrameworkMoves_AndTheStalePackageIsNamed()
+    {
+        using var fixture = FixtureHarness.CopyToTemp("fixture-stale-package-fixed-by-bump");
+        var path = fixture.Path;
+        var before = await Git(path, "rev-parse", "HEAD");
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.NeedsReview, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("still on the old major") && r.Contains("Microsoft.AspNetCore.Mvc.Testing 8.0.11"));
+        Assert.DoesNotContain(result.Reasons, r => r.Contains("moved to the new framework's major"));
+        Assert.Equal("1", await Git(path, "rev-list", "--count", $"{before}..{result.BranchName}"));
+        Assert.Contains("Mvc.Testing\" Version=\"8.0.11\"", await Git(path, "show", $"{result.BranchName}:src/WebApp.Tests/WebApp.Tests.csproj"));
+    }
+
+    [Fact]
+    public async Task BumpPackages_ThatDoesNotHelp_IsDropped_LeavingOnlyTheFrameworkBump()
+    {
+        // This fixture's failing test has nothing to do with the package, so moving it can't fix anything.
+        // The speculative commit must go, and the verdict must say it was tried.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-stale-framework-package");
+        var path = fixture.Path;
+        var before = await Git(path, "rev-parse", "HEAD");
+
+        var result = await CreateEngine(bumpPackages: true).RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.NeedsReview, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("did not fix the failure") && r.Contains("Microsoft.Extensions.Options"));
+        Assert.Equal(["Rollforward: upgrade target framework to net10.0"],
+            (await Git(path, "log", "--format=%s", $"{before}..{result.BranchName}")).Split('\n', StringSplitOptions.TrimEntries));
+        Assert.Contains("Options\" Version=\"8.0.0\"", await Git(path, "show", $"{result.BranchName}:src/SampleApp/SampleApp.csproj"));
+        Assert.Equal("", await Git(path, "status", "--porcelain", "--untracked-files=no"));
     }
 
     [Fact]
