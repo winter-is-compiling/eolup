@@ -222,11 +222,8 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
         await CommitMigrationAsync(projectPath, changedFiles, targetTfm, cancellationToken);
 
-        // Where the migration stands before any package is touched; a package bump (below) restarts from here.
-        var tfmCommit = (await ProcessRunner.RunAsync("git", ["rev-parse", "HEAD"], projectPath, cancellationToken))
-            .StandardOutput.Trim();
-
-        var assessment = await AssessAsync(buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, cancellationToken);
+        var assessment = await AssessAsync(
+            buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: true, cancellationToken);
 
         // Only looked for when something already failed: it explains a failure, it never creates one.
         // And only in the projects this run moved — a project left on an older line on purpose
@@ -237,29 +234,47 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         if (assessment.Failed)
         {
             var stale = FrameworkAlignedPackages.FindStale(projectPath, projectsToBump.Select(b => b.File), currentVersion.Major);
-            var edited = _bumpPackages || config.BumpPackages
-                ? await BumpPackagesAsync(stale, VersionPlanning.TryParse(targetTfm)!.Major, projectPath, cancellationToken)
-                : [];
 
-            if (edited.Count > 0)
+            // Opt-in, and only when the migration is the likely culprit: a suite that was already failing
+            // on the untouched code can't be fixed by moving packages, so don't spend a retry on it.
+            IReadOnlyList<(StalePackage Package, string NewVersion)> edited = [];
+            var migrationBrokeIt = !assessment.Build.Succeeded || TestComparison.BlamesMigration(assessment.TestComparison);
+            if ((_bumpPackages || config.BumpPackages) && migrationBrokeIt)
             {
-                // Opt-in retry: bumping is judged by exactly the same build and tests as the framework
-                // bump. Kept only if it makes the migration pass; otherwise our own commit is dropped, so
-                // the branch holds just the framework change and nothing speculative.
-                var retry = await AssessAsync(buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, cancellationToken);
-                if (!retry.Failed)
+                // Shared props files reach every project, so they are only edited when every project is being moved.
+                var bumpable = FrameworkAlignedPackages.LimitToBumpedProjects(
+                    stale, CsProjHelper.FindProjectFiles(projectPath), projectsToBump.Select(b => b.File));
+
+                // Where the migration stands before any package is touched; a failed bump goes back to here.
+                var tfmCommit = (await ProcessRunner.RunAsync("git", ["rev-parse", "HEAD"], projectPath, cancellationToken))
+                    .StandardOutput.Trim();
+
+                edited = await BumpPackagesAsync(bumpable, VersionPlanning.TryParse(targetTfm)!.Major, projectPath, cancellationToken);
+
+                if (edited.Count > 0)
                 {
-                    assessment = retry;
-                    packagesBumped = edited.Select(DescribeBump).ToList();
-                }
-                else
-                {
-                    var drop = await ProcessRunner.RunAsync("git", ["reset", "--hard", tfmCommit], projectPath, cancellationToken);
-                    if (!drop.Succeeded)
-                        throw new RollforwardUserException(
-                            $"Bumping the framework-aligned packages didn't fix the failure, and Rollforward couldn't drop its own commit " +
-                            $"again: {drop.StandardError.Trim()} The branch '{branchName}' still holds it; reset it to {tfmCommit} by hand.");
-                    bumpDidNotHelp = edited.Select(DescribeBump).ToList();
+                    // Bumping is judged by exactly the same build and tests as the framework bump. Kept only if
+                    // it makes the migration pass; otherwise our own commit is dropped, so the branch holds just
+                    // the framework change and nothing speculative. The baseline comparison isn't repeated: the
+                    // untouched code's result can't have changed, and a dropped retry's comparison is discarded.
+                    var retry = await AssessAsync(
+                        buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: false, cancellationToken);
+                    if (!retry.Failed)
+                    {
+                        assessment = retry;
+                        packagesBumped = edited.Select(DescribeBump).ToList();
+                    }
+                    else
+                    {
+                        // --keep, not --hard: anything the user had uncommitted in the working tree when they ran
+                        // Rollforward came along onto this branch, and must survive; it only drops our own commit.
+                        var drop = await ProcessRunner.RunAsync("git", ["reset", "--keep", tfmCommit], projectPath, cancellationToken);
+                        if (!drop.Succeeded)
+                            throw new RollforwardUserException(
+                                $"Bumping the framework-aligned packages didn't fix the failure, and Rollforward couldn't drop its own commit " +
+                                $"again: {drop.StandardError.Trim()} The branch '{branchName}' still holds it; reset it to {tfmCommit} by hand.");
+                        bumpDidNotHelp = edited.Select(DescribeBump).ToList();
+                    }
                 }
             }
 
@@ -301,7 +316,17 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         if (result.ChangedFiles.Count == 0)
             return [];
 
-        await CommitFilesAsync(projectPath, result.ChangedFiles, $"Rollforward: align framework packages to {targetMajor}.x", cancellationToken);
+        try
+        {
+            await CommitFilesAsync(projectPath, result.ChangedFiles, $"Rollforward: align framework packages to {targetMajor}.x", cancellationToken);
+        }
+        catch (RollforwardUserException)
+        {
+            // An optional retry must never fail the run: a commit hook, signing setup or git itself refused it.
+            // Put the files back as the framework-bump commit left them and carry on with the verdict already earned.
+            await ProcessRunner.RunAsync("git", ["checkout", "HEAD", "--", .. result.ChangedFiles], projectPath, cancellationToken);
+            return [];
+        }
 
         var notEdited = result.NotEdited.ToHashSet();
         return stale.Where(p => !notEdited.Contains(p)).Select(p => (p, versions[p.Id])).ToList();
@@ -316,7 +341,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
     private static async Task<Assessment> AssessAsync(
         string buildTarget, string projectPath, bool testProjectExists, HashSet<string> baselineMarkers,
-        string baseCommit, string branchName, CancellationToken cancellationToken)
+        string baseCommit, string branchName, bool compareWithBaseline, CancellationToken cancellationToken)
     {
         var buildResult = await ProcessRunner.RunAsync("dotnet", ["build", buildTarget], projectPath, cancellationToken);
         var manualActionMarkers = buildResult.Succeeded
@@ -357,7 +382,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
                     // Still failing: find out whether it was already failing before
                     // the migration touched anything.
-                    if (!plain.Succeeded)
+                    if (!plain.Succeeded && compareWithBaseline)
                         testComparison = await CompareWithBaselineAsync(
                             plain, baseCommit, branchName, buildTarget, projectPath, cancellationToken);
                 }

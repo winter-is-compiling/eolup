@@ -122,9 +122,11 @@ A target-framework bump leaves packages that version with the framework on the o
 
 1. It makes the framework bump and builds and tests as usual.
 2. Only if that fails, and framework-tied packages are still on the old major, it moves them all to the newest stable release on the new major, as a **separate commit**, and builds and tests again.
-3. If that passes, the bump is kept and the verdict lists every package that moved, so the PR shows exactly what changed. If it still fails, the commit is dropped, the branch holds only the framework bump, and the verdict says the bump was tried.
+3. If that passes, the bump is kept and the verdict lists every package that moved, so the PR shows exactly what changed. If it still fails, the commit is dropped, the branch holds only the framework bump, and the verdict says the bump was tried. Dropping it only removes Rollforward's own commit: anything you had uncommitted in your working tree is left alone.
 
-Limits for now: versions are looked up on nuget.org only (a package that exists only on a private feed isn't bumped); versions set through an MSBuild property (`$(Version)`) aren't edited; and only packages in the framework-tied families are touched, in the projects that were bumped.
+It is only tried when the migration is the likely cause: a suite that was already failing on the untouched code isn't retried. And if git refuses the bump commit (a hook, signing), the bump is skipped and the run ends with the verdict the framework bump earned.
+
+Limits for now: versions are looked up on nuget.org only (a package that exists only on a private feed isn't bumped); versions set through an MSBuild property (`$(Version)`) aren't edited; only packages in the framework-tied families are touched; and entries in shared files (`Directory.Packages.props`, `Directory.Build.props`) are edited only when every project in the repo is being bumped, because those files reach projects the run isn't touching.
 
 ## Requirements
 

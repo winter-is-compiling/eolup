@@ -463,6 +463,61 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task DroppingAFailedBump_NeverTouchesWhatTheUserHadUncommitted()
+    {
+        // Uncommitted work comes along onto the remediation branch. Dropping Rollforward's own package commit
+        // must not take it with it (it used to `git reset --hard`).
+        using var fixture = FixtureHarness.CopyToTemp("fixture-stale-framework-package");
+        var path = fixture.Path;
+        var greeter = Path.Combine(path, "src", "SampleApp", "Greeter.cs");
+        await File.AppendAllTextAsync(greeter, "\n// work in progress, not committed\n");
+
+        var result = await CreateEngine(bumpPackages: true).RemediateAsync(path);
+
+        Assert.Contains(result.Reasons, r => r.Contains("did not fix the failure"));
+        Assert.Contains("work in progress, not committed", await File.ReadAllTextAsync(greeter));
+        Assert.Equal("M src/SampleApp/Greeter.cs", await Git(path, "status", "--porcelain", "--untracked-files=no"));
+    }
+
+    [Fact]
+    public async Task BumpPackages_CanBeSwitchedOnFromRollforwardYml()
+    {
+        using var fixture = FixtureHarness.CopyToTemp("fixture-stale-package-fixed-by-bump");
+        var path = fixture.Path;
+        await File.WriteAllTextAsync(Path.Combine(path, ".rollforward.yml"), "bumpPackages: true\n");
+        await Git(path, "add", ".rollforward.yml");
+        await Git(path, "commit", "-q", "-m", "Enable the package bump");
+
+        var result = await CreateEngine().RemediateAsync(path); // no flag: the file alone turns it on
+
+        Assert.Equal(ConfidenceVerdict.HighConfidence, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("Microsoft.AspNetCore.Mvc.Testing 8.0.11 → 10."));
+    }
+
+    [Fact]
+    public async Task ABumpCommitThatGitRefuses_NeverFailsTheRun_AndLeavesNoStrayEdits()
+    {
+        // The package bump is an optional retry. If a commit hook rejects it, the run still ends with the
+        // verdict the framework bump earned, and the edited files are put back.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-stale-package-fixed-by-bump");
+        var path = fixture.Path;
+        var hook = Path.Combine(path, ".git", "hooks", "commit-msg");
+        await File.WriteAllTextAsync(hook,
+            "#!/bin/sh\nif grep -q 'align framework packages' \"$1\"; then echo 'rejected by the test hook' >&2; exit 1; fi\n");
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var before = await Git(path, "rev-parse", "HEAD");
+
+        var result = await CreateEngine(bumpPackages: true).RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.NeedsReview, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("still on the old major") && r.Contains("Microsoft.AspNetCore.Mvc.Testing 8.0.11"));
+        Assert.Equal("1", await Git(path, "rev-list", "--count", $"{before}..{result.BranchName}"));
+        Assert.Contains("Mvc.Testing\" Version=\"8.0.11\"", await File.ReadAllTextAsync(Path.Combine(path, "src", "WebApp.Tests", "WebApp.Tests.csproj")));
+        Assert.Equal("", await Git(path, "status", "--porcelain", "--untracked-files=no"));
+    }
+
+    [Fact]
     public async Task NoTestProject_YieldsBlocked()
     {
         using var fixture = FixtureHarness.CopyToTemp("fixture-no-tests");
