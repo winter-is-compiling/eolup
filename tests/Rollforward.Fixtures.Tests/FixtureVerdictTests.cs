@@ -321,6 +321,70 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task RemediationBranch_KeepsCountingPastEveryLeftoverLocalBranch()
+    {
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        await Git(path, "branch", "rollforward/upgrade-to-10.0");
+        await Git(path, "branch", "rollforward/upgrade-to-10.0-2");
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal("rollforward/upgrade-to-10.0-3", result.BranchName);
+    }
+
+    [Fact]
+    public async Task RemediationBranch_NameCollisionIgnoresCase()
+    {
+        // On Windows and macOS `Rollforward/...` and `rollforward/...` are the same ref, so a
+        // differently-cased leftover must count as taken rather than make `checkout -b` fail.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        await Git(path, "branch", "Rollforward/Upgrade-To-10.0");
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal("rollforward/upgrade-to-10.0-2", result.BranchName);
+    }
+
+    [Fact]
+    public async Task BranchAlreadyOnARemote_StopsTheRun_InsteadOfOpeningADuplicate()
+    {
+        // An earlier run's PR is still open: its branch is on the remote. Suffixing "-2" would
+        // push a second branch and open a second PR for the same upgrade on every run.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var userBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        var before = await Git(path, "rev-parse", "HEAD");
+        await Git(path, "update-ref", "refs/remotes/origin/rollforward/upgrade-to-10.0", "HEAD");
+
+        var error = await Assert.ThrowsAsync<RollforwardUserException>(() => CreateEngine().RemediateAsync(path));
+
+        Assert.Contains("already exists on a remote", error.Message);
+        Assert.Equal(before, await Git(path, "rev-parse", userBranch));
+        Assert.Equal(userBranch, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+        Assert.Equal("", await Git(path, "branch", "--list", "rollforward/*"));
+    }
+
+    [Fact]
+    public async Task BranchThatCannotBeCreated_IsAnError_NotASilentCommitOnTheCurrentBranch()
+    {
+        // A branch literally named "rollforward" blocks "rollforward/upgrade-to-10.0" (a ref can't be
+        // both a file and a directory), so `checkout -b` fails — and used to be ignored.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var userBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        var before = await Git(path, "rev-parse", "HEAD");
+        await Git(path, "branch", "rollforward");
+
+        var error = await Assert.ThrowsAsync<RollforwardUserException>(() => CreateEngine().RemediateAsync(path));
+
+        Assert.Contains("Could not create the branch", error.Message);
+        Assert.Equal(before, await Git(path, "rev-parse", userBranch));
+        Assert.Equal(userBranch, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+    }
+
+    [Fact]
     public async Task NoTestProject_YieldsBlocked()
     {
         using var fixture = FixtureHarness.CopyToTemp("fixture-no-tests");
