@@ -385,6 +385,24 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task StaleFrameworkPackage_IsNamedWhenTheUpgradeBreaksATest()
+    {
+        // End to end on real dotnet/git: SampleApp references Microsoft.Extensions.Options 8.0.0,
+        // the bump to net10.0 leaves it there, and a test breaks. The verdict stays NeedsReview
+        // for the right reason (the broken test) and also names the package as a likely cause.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-stale-framework-package");
+        var path = fixture.Path;
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.NeedsReview, result.Verdict);
+        Assert.Contains(result.TestComparison!.NewFailures, t => t.EndsWith("Runtime_IsOlderThanDotNet10"));
+        Assert.Contains(result.Reasons, r =>
+            r.Contains("still on the old major") &&
+            r.Contains("Microsoft.Extensions.Options 8.0.0 (src/SampleApp/SampleApp.csproj)"));
+    }
+
+    [Fact]
     public async Task NoTestProject_YieldsBlocked()
     {
         using var fixture = FixtureHarness.CopyToTemp("fixture-no-tests");

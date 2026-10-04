@@ -259,8 +259,16 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
             }
         }
 
+        // Only looked for when something already failed: it explains a failure, it never creates one.
+        // And only in the projects this run moved — a project left on an older line on purpose
+        // (or already on a newer one) isn't what broke.
+        var frameworkAlignedPackages = !buildResult.Succeeded || testsPassed == false
+            ? FrameworkAlignedPackages.Find(projectPath, projectsToBump.Select(b => b.File), currentVersion.Major)
+            : [];
+
         return new RemediationOutcome(
-            buildResult.Succeeded, testProjectExists, testsPassed, manualActionMarkers, branchName, coverage, testComparison);
+            buildResult.Succeeded, testProjectExists, testsPassed, manualActionMarkers, branchName, coverage, testComparison,
+            frameworkAlignedPackages);
     }
 
     /// <summary>
