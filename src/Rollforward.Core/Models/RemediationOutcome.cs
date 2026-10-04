@@ -6,6 +6,10 @@ namespace Rollforward.Core.Models;
 /// separate so the scoring rules stay a pure function, independent of any
 /// provider's implementation details.
 /// </summary>
+/// <param name="FrameworkAlignedPackages">
+/// Packages still on the old framework's major version ("Id Version (file)"), reported only
+/// when the build or tests failed — a likely cause, never a verdict on its own.
+/// </param>
 public sealed record RemediationOutcome(
     bool BuildSucceeded,
     bool TestProjectExists,
@@ -14,7 +18,5 @@ public sealed record RemediationOutcome(
     string? BranchName,
     CoverageReport? Coverage = null,
     TestComparison? TestComparison = null,
-    // Packages still on the old framework's major version ("Id Version (file)"), reported
-    // only when the build or tests failed — a likely cause, never a verdict on its own.
     IReadOnlyList<string>? FrameworkAlignedPackages = null
 );

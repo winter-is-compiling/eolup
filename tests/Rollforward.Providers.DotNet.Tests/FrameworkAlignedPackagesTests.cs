@@ -89,6 +89,108 @@ public class FrameworkAlignedPackagesTests
     }
 
     [Fact]
+    public void FindsPackagesInARepoThatLivesUnderADirectoryCalledBinOrObj()
+    {
+        // The bin/obj filter once looked at the whole absolute path, so a checkout at
+        // ~/bin/myrepo or C:\work\obj\app silently produced no hints at all.
+        using var dir = new TempDir();
+        var repo = Path.Combine(dir.Path, "bin", "obj", "myrepo");
+        var project = dir.Write("bin/obj/myrepo/App/App.csproj",
+            Project("<PackageReference Include=\"Microsoft.Extensions.Options\" Version=\"8.0.0\" />"));
+        dir.Write("bin/obj/myrepo/Directory.Packages.props",
+            "<Project><ItemGroup><PackageVersion Include=\"Microsoft.AspNetCore.Mvc.Testing\" Version=\"8.0.11\" /></ItemGroup></Project>");
+
+        var found = FrameworkAlignedPackages.Find(repo, [project], 8);
+
+        Assert.Equal(2, found.Count);
+    }
+
+    [Fact]
+    public void DoesNotSearchBuildOutputOrDependencyFoldersForSharedFiles()
+    {
+        using var dir = new TempDir().AsRepoRoot();
+        const string props =
+            "<Project><ItemGroup><PackageVersion Include=\"Microsoft.Extensions.Options\" Version=\"8.0.0\" /></ItemGroup></Project>";
+        dir.Write("obj/Directory.Packages.props", props);
+        dir.Write("src/node_modules/pkg/Directory.Build.props", props);
+        dir.Write("src/bin/Debug/Directory.Packages.props", props);
+
+        Assert.Empty(FrameworkAlignedPackages.Find(dir.Path, [], 8));
+    }
+
+    [Fact]
+    public void OnlyLooksAtTheProjectsItIsGiven()
+    {
+        // A project left on another line on purpose, or not part of this bump, isn't what broke.
+        using var dir = new TempDir().AsRepoRoot();
+        var bumped = dir.Write("A/A.csproj", Project("<PackageReference Include=\"Microsoft.Extensions.Options\" Version=\"8.0.0\" />"));
+        dir.Write("B/B.csproj", Project("<PackageReference Include=\"Microsoft.Extensions.Logging\" Version=\"8.0.0\" />"));
+
+        var found = Assert.Single(FrameworkAlignedPackages.Find(dir.Path, [bumped], 8));
+
+        Assert.StartsWith("Microsoft.Extensions.Options", found);
+    }
+
+    [Theory]
+    [InlineData("Microsoft.AspNetCore.OData", "8.2.5")]
+    [InlineData("Microsoft.Extensions.Http.Resilience", "8.10.0")]
+    [InlineData("Microsoft.Extensions.AI.Abstractions", "8.0.0")]
+    public void SkipsPackagesWithTheirOwnVersionLine(string id, string version)
+    {
+        // OData 8.x is not "for .NET 8"; telling the user to bump it would send triage the wrong way.
+        using var dir = new TempDir().AsRepoRoot();
+        dir.Write("App/App.csproj", Project($"<PackageReference Include=\"{id}\" Version=\"{version}\" />"));
+
+        Assert.Empty(FindIn(dir, 8));
+    }
+
+    [Fact]
+    public void SkipsEntriesWhenAnyAncestorHasACondition()
+    {
+        using var dir = new TempDir().AsRepoRoot();
+        dir.Write("App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Choose><When Condition=\"'$(TargetFramework)' == 'net8.0'\"><ItemGroup>" +
+            "<PackageReference Include=\"Microsoft.AspNetCore.Mvc.Testing\" Version=\"8.0.11\" />" +
+            "</ItemGroup></When></Choose></Project>");
+
+        Assert.Empty(FindIn(dir, 8));
+    }
+
+    [Fact]
+    public void ReadsPackagesDeclaredInDirectoryBuildProps()
+    {
+        using var dir = new TempDir().AsRepoRoot();
+        dir.Write("Directory.Build.props",
+            "<Project><ItemGroup><PackageReference Include=\"Microsoft.Extensions.Options\" Version=\"8.0.0\" /></ItemGroup></Project>");
+
+        var found = Assert.Single(FindIn(dir, 8));
+
+        Assert.Equal("Microsoft.Extensions.Options 8.0.0 (Directory.Build.props)", found);
+    }
+
+    [Fact]
+    public void AnAbsurdlyLargeMajorIsIgnored_NotAnException()
+    {
+        using var dir = new TempDir().AsRepoRoot();
+        dir.Write("App/App.csproj", Project("<PackageReference Include=\"Microsoft.Extensions.Options\" Version=\"99999999999.0.0\" />"));
+
+        Assert.Empty(FindIn(dir, 8));
+    }
+
+    [Fact]
+    public void AFileThatCannotBeReadIsSkipped_NotAnException()
+    {
+        // A hint is advisory: a locked or unreadable file must never abort the run.
+        using var dir = new TempDir().AsRepoRoot();
+        var good = dir.Write("A/A.csproj", Project("<PackageReference Include=\"Microsoft.Extensions.Options\" Version=\"8.0.0\" />"));
+        var missing = Path.Combine(dir.Path, "Gone", "Gone.csproj");
+
+        var found = FrameworkAlignedPackages.Find(dir.Path, [missing, good], 8);
+
+        Assert.Single(found);
+    }
+
+    [Fact]
     public void ToleratesProjectFilesThatAreNotValidXml()
     {
         using var dir = new TempDir().AsRepoRoot();

@@ -43,18 +43,7 @@ public static class ConfidenceScorer
                 ["No test project found in the solution — cannot verify the change is safe."]);
 
         if (testsPassed == false)
-        {
-            var failed = ScoreFailedTests(testComparison, Result);
-
-            // Stale framework-aligned packages are a plausible cause only when the migration
-            // itself broke something — not when every failure was already there before it.
-            var migrationBrokeSomething = testComparison is null
-                || testComparison.BaselinePassed
-                || (testComparison.FailuresIdentified && testComparison.NewFailures.Count > 0);
-            return migrationBrokeSomething
-                ? failed with { Reasons = WithPackageHint([.. failed.Reasons], frameworkAlignedPackages) }
-                : failed;
-        }
+            return ScoreFailedTests(testComparison, frameworkAlignedPackages, Result);
 
         if (coverage is { CoveredLines: 0 })
             return Result(ConfidenceVerdict.Blocked,
@@ -102,8 +91,8 @@ public static class ConfidenceScorer
     {
         if (packages is { Count: > 0 })
             reasons.Add(
-                "These packages version with the framework and are still on the old major — a common cause of " +
-                $"post-upgrade failures, worth bumping to match the new framework: {Names(packages)}.");
+                "These packages usually version with the framework and are still on the old major — a common cause of " +
+                $"post-upgrade failures, worth checking whether they need bumping to match the new framework: {Names(packages)}.");
         return reasons;
     }
 
@@ -111,19 +100,24 @@ public static class ConfidenceScorer
     /// The tests failed after the migration. Whether that says anything about the
     /// migration depends on whether they passed before it (found across
     /// three real repos whose suites were already broken on the untouched code).
+    /// The stale-package hint rides along on exactly the outcomes that blame the migration,
+    /// so it is decided here, next to the rule that decides blame, not re-derived elsewhere.
     /// </summary>
     private static RemediationResult ScoreFailedTests(
-        TestComparison? comparison, Func<ConfidenceVerdict, List<string>, RemediationResult> result)
+        TestComparison? comparison, IReadOnlyList<string>? stalePackages,
+        Func<ConfidenceVerdict, List<string>, RemediationResult> result)
     {
         if (comparison is null)
-            return result(ConfidenceVerdict.NeedsReview,
-                ["Existing test suite failed after remediation — needs human judgment on whether this is a real regression."]);
+            return result(ConfidenceVerdict.NeedsReview, WithPackageHint(
+                ["Existing test suite failed after remediation — needs human judgment on whether this is a real regression."],
+                stalePackages));
 
         if (comparison.BaselinePassed)
-            return result(ConfidenceVerdict.NeedsReview,
+            return result(ConfidenceVerdict.NeedsReview, WithPackageHint(
                 [comparison.FailuresIdentified && comparison.NewFailures.Count > 0
                     ? $"The test suite passed before the migration and fails after it — a likely regression. Newly failing: {Names(comparison.NewFailures)}."
-                    : "The test suite passed before the migration and fails after it — a likely regression."]);
+                    : "The test suite passed before the migration and fails after it — a likely regression."],
+                stalePackages));
 
         if (!comparison.FailuresIdentified)
             return result(ConfidenceVerdict.Blocked,
@@ -131,9 +125,10 @@ public static class ConfidenceScorer
                  "so it can't show whether the migration broke anything — cannot verify the change is safe."]);
 
         if (comparison.NewFailures.Count > 0)
-            return result(ConfidenceVerdict.NeedsReview,
+            return result(ConfidenceVerdict.NeedsReview, WithPackageHint(
                 [$"{comparison.NewFailures.Count} test(s) that passed before the migration now fail — a likely regression: {Names(comparison.NewFailures)}.",
-                 $"{comparison.AlreadyFailing.Count} other failing test(s) were already failing before the migration: {Names(comparison.AlreadyFailing)}."]);
+                 $"{comparison.AlreadyFailing.Count} other failing test(s) were already failing before the migration: {Names(comparison.AlreadyFailing)}."],
+                stalePackages));
 
         return result(ConfidenceVerdict.NeedsReview,
             [$"No test broke because of the migration: all {comparison.AlreadyFailing.Count} failing test(s) were already failing on the untouched code " +

@@ -47,6 +47,28 @@ public class FrameworkAlignedPackageHintTests
     }
 
     [Fact]
+    public void NewFailuresAlongsidePreExistingOnes_GetTheHint()
+    {
+        var mixed = new TestComparison(false, ["Api.Tests.Due"], ["Api.Tests.Flaky"], true);
+
+        var result = Score(testsPassed: false, comparison: mixed, packages: Stale);
+
+        Assert.Equal(ConfidenceVerdict.NeedsReview, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("still on the old major"));
+    }
+
+    [Fact]
+    public void SuiteThatFailsEvenOnTheUntouchedCodeWithNothingToCompare_StaysBlockedWithoutAHint()
+    {
+        var unidentified = new TestComparison(false, [], [], false);
+
+        var result = Score(testsPassed: false, comparison: unidentified, packages: Stale);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.DoesNotContain(result.Reasons, r => r.Contains("still on the old major"));
+    }
+
+    [Fact]
     public void FailuresThatWereAlreadyThereBeforeTheMigration_GetNoHint()
     {
         var alreadyFailing = new TestComparison(false, [], ["Api.Tests.Flaky"], true);
