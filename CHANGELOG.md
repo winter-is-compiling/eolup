@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Fixed: if the remediation branch (`rollforward/upgrade-to-N`) already existed, `remediate` failed to create it without saying so and committed the migration onto the branch you were on. A leftover local branch now makes it pick a free name (`-2`, `-3`, …, ignoring case). A branch of that name on a remote (an earlier run's PR is probably still open) stops the run with an explanation instead of opening a duplicate PR. A branch that still can't be created is an error before anything changes.
+
 ## [0.1.0] — 2026-09-28
 
 First release. **Pre-alpha, .NET only** — useful today on real repos, but expect rough edges.

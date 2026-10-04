@@ -188,8 +188,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         var baseCommit = (await ProcessRunner.RunAsync("git", ["rev-parse", "HEAD"], projectPath, cancellationToken))
             .StandardOutput.Trim();
 
-        var branchName = $"rollforward/upgrade-to-{targetVersion}";
-        await ProcessRunner.RunAsync("git", $"checkout -b {branchName}", projectPath, cancellationToken);
+        var branchName = await CreateRemediationBranchAsync(projectPath, $"rollforward/upgrade-to-{targetVersion}", cancellationToken);
 
         var changedFiles = new HashSet<string>();
         foreach (var bump in projectsToBump)
@@ -262,6 +261,53 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
         return new RemediationOutcome(
             buildResult.Succeeded, testProjectExists, testsPassed, manualActionMarkers, branchName, coverage, testComparison);
+    }
+
+    /// <summary>
+    /// Creates and switches to the branch the migration is committed on, and returns its name.
+    /// The result of `git checkout -b` used to be ignored: when the branch already existed
+    /// (an earlier run, or one fetched from the remote) the command failed silently and the
+    /// migration was committed onto whatever branch the user was on — breaking the promise that
+    /// remediation never touches the current branch.
+    ///
+    /// A leftover *local* branch is skipped in favour of "-2", "-3", ... (compared ignoring case,
+    /// because on Windows and macOS `Foo` and `foo` are the same ref). A name that already exists
+    /// on a *remote* is different: it almost always means an earlier run's pull request is still
+    /// open, and quietly using "-2" would push a second branch and open a duplicate PR on every
+    /// scheduled run. That stops the run with an explanation instead, before anything changes.
+    /// A checkout that still fails is an error too.
+    /// </summary>
+    private static async Task<string> CreateRemediationBranchAsync(
+        string projectPath, string baseName, CancellationToken cancellationToken)
+    {
+        var refs = await ProcessRunner.RunAsync(
+            "git", ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"], projectPath, cancellationToken);
+        var allRefs = refs.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        // Matching on the trailing "/<name>" keeps this right for remote names that contain a slash.
+        var onRemote = allRefs.FirstOrDefault(r =>
+            r.StartsWith("refs/remotes/", StringComparison.Ordinal) &&
+            r.EndsWith("/" + baseName, StringComparison.OrdinalIgnoreCase));
+        if (onRemote is not null)
+            throw new RollforwardUserException(
+                $"The branch '{baseName}' already exists on a remote ('{onRemote["refs/remotes/".Length..]}') — most likely an earlier " +
+                "Rollforward run's pull request is still open. Merge or close it and delete that branch, then run again. Nothing was changed.");
+
+        var local = allRefs
+            .Where(r => r.StartsWith("refs/heads/", StringComparison.Ordinal))
+            .Select(r => r["refs/heads/".Length..])
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var name = baseName;
+        for (var suffix = 2; local.Contains(name); suffix++)
+            name = $"{baseName}-{suffix}";
+
+        var checkout = await ProcessRunner.RunAsync("git", ["checkout", "-b", name], projectPath, cancellationToken);
+        if (!checkout.Succeeded)
+            throw new RollforwardUserException(
+                $"Could not create the branch '{name}' for the migration: {checkout.StandardError.Trim()} Nothing was changed.");
+
+        return name;
     }
 
     /// <summary>One `dotnet test` run: pass/fail, per-test failures, and where its result files are.</summary>
