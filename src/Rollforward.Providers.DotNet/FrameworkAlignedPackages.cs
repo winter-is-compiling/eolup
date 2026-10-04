@@ -68,14 +68,21 @@ internal static partial class FrameworkAlignedPackages
     /// Directory.Packages/Build.props/targets under <paramref name="root"/>) whose version is
     /// on <paramref name="oldMajor"/>, as "Id Version (relative/path)" lines.
     /// </summary>
-    public static IReadOnlyList<string> Find(string root, IEnumerable<string> projectFiles, int oldMajor)
+    public static IReadOnlyList<string> Find(string root, IEnumerable<string> projectFiles, int oldMajor) =>
+        FindStale(root, projectFiles, oldMajor).Select(p => p.Describe()).ToList();
+
+    /// <summary>
+    /// Same search as <see cref="Find"/>, but returning where each package is declared so
+    /// <see cref="PackageVersionEditor"/> can rewrite exactly that entry.
+    /// </summary>
+    public static IReadOnlyList<StalePackage> FindStale(string root, IEnumerable<string> projectFiles, int oldMajor)
     {
         var files = projectFiles
             .Concat(FindSharedBuildFiles(root))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.OrdinalIgnoreCase);
 
-        var found = new List<string>();
+        var found = new List<StalePackage>();
         foreach (var file in files)
         {
             XDocument doc;
@@ -85,8 +92,10 @@ internal static partial class FrameworkAlignedPackages
                 continue; // not ours to judge, and a hint must never fail the run
             }
 
+            var elementIndex = -1;
             foreach (var item in doc.Descendants().Where(e => e.Name.LocalName is "PackageReference" or "PackageVersion"))
             {
+                elementIndex++; // document order, counting every such element, not only the stale ones
                 // Chosen per framework, configuration or anything else on purpose.
                 if (item.AncestorsAndSelf().Any(e => e.Attribute("Condition") is not null))
                     continue;
@@ -101,7 +110,7 @@ internal static partial class FrameworkAlignedPackages
                 if (version is null || MajorOf(version) != oldMajor)
                     continue;
 
-                found.Add($"{id} {version.Trim()} ({Path.GetRelativePath(root, file).Replace('\\', '/')})");
+                found.Add(new StalePackage(id, version.Trim(), file, Path.GetRelativePath(root, file).Replace('\\', '/'), elementIndex));
             }
         }
 
