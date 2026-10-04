@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed: if the remediation branch (`rollforward/upgrade-to-N`) already existed, `remediate` failed to create it without saying so and committed the migration onto the branch you were on. A leftover local branch now makes it pick a free name (`-2`, `-3`, …, ignoring case). A branch of that name on a remote (an earlier run's PR is probably still open) stops the run with an explanation instead of opening a duplicate PR. A branch that still can't be created is an error before anything changes.
+- When the migration breaks the build or the tests, the verdict now names packages that version with the framework (ASP.NET Core, EF Core, `Microsoft.Extensions.*`, `System.Text.Json`) and are still on the old framework's major version — a common cause of post-upgrade failures, such as `Microsoft.AspNetCore.Mvc.Testing` 8.0.x on net10.0. It is a hint on a failure, never a verdict on its own, and entries that already choose a version per target framework (`Condition`) are left out.
 
 ## [0.1.0] — 2026-09-28
 

@@ -28,21 +28,33 @@ public static class ConfidenceScorer
         string? branchName,
         CoverageReport? coverage = null,
         int minCoveragePercent = DefaultMinCoveragePercent,
-        TestComparison? testComparison = null)
+        TestComparison? testComparison = null,
+        IReadOnlyList<string>? frameworkAlignedPackages = null)
     {
         RemediationResult Result(ConfidenceVerdict verdict, List<string> reasons) =>
             new(verdict, reasons, buildSucceeded, testsPassed, testProjectExists, manualActionMarkers, branchName, coverage, testComparison);
 
         if (!buildSucceeded)
             return Result(ConfidenceVerdict.Blocked,
-                ["Build failed after remediation — cannot verify the change is safe."]);
+                WithPackageHint(["Build failed after remediation — cannot verify the change is safe."], frameworkAlignedPackages));
 
         if (!testProjectExists)
             return Result(ConfidenceVerdict.Blocked,
                 ["No test project found in the solution — cannot verify the change is safe."]);
 
         if (testsPassed == false)
-            return ScoreFailedTests(testComparison, Result);
+        {
+            var failed = ScoreFailedTests(testComparison, Result);
+
+            // Stale framework-aligned packages are a plausible cause only when the migration
+            // itself broke something — not when every failure was already there before it.
+            var migrationBrokeSomething = testComparison is null
+                || testComparison.BaselinePassed
+                || (testComparison.FailuresIdentified && testComparison.NewFailures.Count > 0);
+            return migrationBrokeSomething
+                ? failed with { Reasons = WithPackageHint([.. failed.Reasons], frameworkAlignedPackages) }
+                : failed;
+        }
 
         if (coverage is { CoveredLines: 0 })
             return Result(ConfidenceVerdict.Blocked,
@@ -80,6 +92,20 @@ public static class ConfidenceScorer
     }
 
     private const int FailedTestsToName = 5;
+
+    /// <summary>
+    /// A target-framework bump leaves packages that version with the framework on the old
+    /// major (found by a net8.0 → net10.0 demo whose Mvc.Testing 8.0.x broke on net10).
+    /// Named as a hint when the build or tests failed, never as a reason on its own.
+    /// </summary>
+    private static List<string> WithPackageHint(List<string> reasons, IReadOnlyList<string>? packages)
+    {
+        if (packages is { Count: > 0 })
+            reasons.Add(
+                "These packages version with the framework and are still on the old major — a common cause of " +
+                $"post-upgrade failures, worth bumping to match the new framework: {Names(packages)}.");
+        return reasons;
+    }
 
     /// <summary>
     /// The tests failed after the migration. Whether that says anything about the

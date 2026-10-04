@@ -13,5 +13,8 @@ public sealed record RemediationOutcome(
     IReadOnlyList<string> ManualActionMarkers,
     string? BranchName,
     CoverageReport? Coverage = null,
-    TestComparison? TestComparison = null
+    TestComparison? TestComparison = null,
+    // Packages still on the old framework's major version ("Id Version (file)"), reported
+    // only when the build or tests failed — a likely cause, never a verdict on its own.
+    IReadOnlyList<string>? FrameworkAlignedPackages = null
 );

@@ -259,8 +259,14 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
             }
         }
 
+        // Only looked for when something already failed: it explains a failure, it never creates one.
+        var frameworkAlignedPackages = !buildResult.Succeeded || testsPassed == false
+            ? FrameworkAlignedPackages.Find(projectPath, CsProjHelper.FindProjectFiles(projectPath), currentVersion.Major)
+            : [];
+
         return new RemediationOutcome(
-            buildResult.Succeeded, testProjectExists, testsPassed, manualActionMarkers, branchName, coverage, testComparison);
+            buildResult.Succeeded, testProjectExists, testsPassed, manualActionMarkers, branchName, coverage, testComparison,
+            frameworkAlignedPackages);
     }
 
     /// <summary>
