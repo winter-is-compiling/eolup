@@ -1,6 +1,6 @@
 namespace SampleApp;
 
-// Deliberately no test project anywhere in this fixture — exercises Rollforward's
+// Deliberately no test project anywhere in this fixture — exercises Eolup's
 // "blocked" path, which fires whenever a change cannot be safely verified.
 public class Greeter
 {

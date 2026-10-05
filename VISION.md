@@ -8,7 +8,7 @@ Google's internal answer to this — the Large-Scale Changes system, and the "Ch
 
 That model works. It just isn't available to anyone who isn't Google, Meta, or Netflix — because building it requires a dedicated platform engineering investment that most companies, especially companies whose actual business is building machines, devices, or hardware rather than software, will never be able to justify.
 
-Rollforward exists to close that gap.
+Eolup exists to close that gap.
 
 ## Who we're building for
 

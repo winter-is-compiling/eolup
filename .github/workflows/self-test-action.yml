@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Rollforward scan via the local action
+      - name: Run Eolup scan via the local action
         uses: ./
         with:
           command: scan

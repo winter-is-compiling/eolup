@@ -1,12 +1,12 @@
-name: 'Rollforward .NET Upgrade'
-description: 'Upgrade end-of-life .NET target frameworks and open a PR only when your own tests prove it is safe.'
+name: 'Eolup'
+description: 'Continuous EOL upgrade: moves projects off end-of-life frameworks and opens a PR only when your own tests pass.'
 branding:
   icon: 'shield'
   color: 'blue'
 
 inputs:
   command:
-    description: "Which Rollforward command to run: 'scan' or 'remediate'."
+    description: "Which Eolup command to run: 'scan' or 'remediate'."
     required: true
     default: 'scan'
   path:
@@ -18,7 +18,7 @@ inputs:
   fail-on:
     description: >
       Which `remediate` verdicts should fail this step (exit code 2): 'none'
-      (default — Rollforward reports, you decide), 'blocked', or 'needs-review'
+      (default — Eolup reports, you decide), 'blocked', or 'needs-review'
       (anything short of HighConfidence). Ignored by `scan`.
     required: false
     default: 'none'
@@ -41,9 +41,9 @@ inputs:
     default: 'false'
   version:
     description: >
-      Which release's pre-built `rollforward` binary to use, e.g. 'v0.1.0' or
+      Which release's pre-built `eolup` binary to use, e.g. 'v0.3.0' or
       'latest'. Defaults to the release tag this Action is pinned to
-      (`uses: winter-is-compiling/rollforward@v0.1.0`). Pinned to a branch or a commit
+      (`uses: winter-is-compiling/eolup@v0.3.0`). Pinned to a branch or a commit
       instead, or if the download fails, the CLI is built from source.
     required: false
     default: ''
@@ -59,32 +59,32 @@ runs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        # Needed either way: Rollforward drives the real `dotnet build`/`dotnet test`
+        # Needed either way: Eolup drives the real `dotnet build`/`dotnet test`
         # of the project it upgrades.
         dotnet-version: '10.0.x'
 
-    # A pre-built binary saves every run from compiling Rollforward itself.
+    # A pre-built binary saves every run from compiling Eolup itself.
     # Anything short of a verified download falls back to building from source,
     # so an unusual runner never breaks the step — it's only slower.
-    - name: Get the rollforward CLI
+    - name: Get the eolup CLI
       id: cli
       shell: bash
       env:
-        RF_VERSION: ${{ inputs.version }}
-        RF_ACTION_REF: ${{ github.action_ref }}
-        RF_REPO: ${{ github.action_repository || github.repository }}
+        EOLUP_VERSION: ${{ inputs.version }}
+        EOLUP_ACTION_REF: ${{ github.action_ref }}
+        EOLUP_REPO: ${{ github.action_repository || github.repository }}
         GH_TOKEN: ${{ github.token }}
       run: |
         fallback() {
-          echo "::notice::Building Rollforward from source ($1)."
+          echo "::notice::Building Eolup from source ($1)."
           echo "source=source" >> "$GITHUB_OUTPUT"
           echo "path=" >> "$GITHUB_OUTPUT"
           exit 0
         }
 
-        version="$RF_VERSION"
-        if [ -z "$version" ] && [[ "$RF_ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-          version="$RF_ACTION_REF"
+        version="$EOLUP_VERSION"
+        if [ -z "$version" ] && [[ "$EOLUP_ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          version="$EOLUP_ACTION_REF"
         fi
         [ -n "$version" ] || fallback "not pinned to a release"
 
@@ -96,60 +96,60 @@ runs:
           *)             fallback "no pre-built binary for $RUNNER_OS/$RUNNER_ARCH" ;;
         esac
 
-        dir="$RUNNER_TEMP/rollforward-cli"
+        dir="$RUNNER_TEMP/eolup-cli"
         rm -rf "$dir" && mkdir -p "$dir"
         tag_args=("$version"); [ "$version" = "latest" ] && tag_args=()
-        gh release download "${tag_args[@]}" --repo "$RF_REPO" --dir "$dir" \
-          --pattern "rollforward-$rid.*" --pattern SHA256SUMS \
-          || fallback "couldn't download release $version of $RF_REPO"
+        gh release download "${tag_args[@]}" --repo "$EOLUP_REPO" --dir "$dir" \
+          --pattern "eolup-$rid.*" --pattern SHA256SUMS \
+          || fallback "couldn't download release $version of $EOLUP_REPO"
 
         if command -v sha256sum > /dev/null; then sum=(sha256sum -c -); else sum=(shasum -a 256 -c -); fi
-        (cd "$dir" && grep " rollforward-$rid\." SHA256SUMS | "${sum[@]}") || fallback "checksum mismatch"
+        (cd "$dir" && grep " eolup-$rid\." SHA256SUMS | "${sum[@]}") || fallback "checksum mismatch"
 
         if [ "$rid" = "win-x64" ]; then
-          pwsh -NoProfile -Command "Expand-Archive -LiteralPath '$(cygpath -w "$dir/rollforward-$rid.zip")' -DestinationPath '$(cygpath -w "$dir")' -Force" \
+          pwsh -NoProfile -Command "Expand-Archive -LiteralPath '$(cygpath -w "$dir/eolup-$rid.zip")' -DestinationPath '$(cygpath -w "$dir")' -Force" \
             || fallback "couldn't extract the archive"
-          exe="$dir/rollforward.exe"
+          exe="$dir/eolup.exe"
         else
-          tar -xzf "$dir/rollforward-$rid.tar.gz" -C "$dir" || fallback "couldn't extract the archive"
-          exe="$dir/rollforward"
+          tar -xzf "$dir/eolup-$rid.tar.gz" -C "$dir" || fallback "couldn't extract the archive"
+          exe="$dir/eolup"
         fi
 
         "$exe" --version || fallback "the downloaded binary didn't run"
         echo "source=release" >> "$GITHUB_OUTPUT"
         echo "path=$exe" >> "$GITHUB_OUTPUT"
 
-    - name: Run rollforward ${{ inputs.command }}
+    - name: Run eolup ${{ inputs.command }}
       shell: bash
       # Inputs go through env rather than being spliced into the script, so a
       # crafted input value can't inject shell.
       env:
-        RF_COMMAND: ${{ inputs.command }}
-        RF_PATH: ${{ inputs.path }}
-        RF_FAIL_ON: ${{ inputs.fail-on }}
-        RF_CHAIN: ${{ inputs.chain }}
-        RF_BUMP_PACKAGES: ${{ inputs.bump-packages }}
-        RF_CLI: ${{ steps.cli.outputs.path }}
+        EOLUP_COMMAND: ${{ inputs.command }}
+        EOLUP_PATH: ${{ inputs.path }}
+        EOLUP_FAIL_ON: ${{ inputs.fail-on }}
+        EOLUP_CHAIN: ${{ inputs.chain }}
+        EOLUP_BUMP_PACKAGES: ${{ inputs.bump-packages }}
+        EOLUP_CLI: ${{ steps.cli.outputs.path }}
       run: |
-        TARGET_PATH="$RF_PATH"
+        TARGET_PATH="$EOLUP_PATH"
         if [ -z "$TARGET_PATH" ]; then
           TARGET_PATH="$GITHUB_WORKSPACE"
         fi
         EXTRA_ARGS=()
-        if [ "$RF_COMMAND" = "remediate" ]; then
-          EXTRA_ARGS+=(--fail-on "$RF_FAIL_ON")
-          if [ "$RF_CHAIN" = "true" ]; then
+        if [ "$EOLUP_COMMAND" = "remediate" ]; then
+          EXTRA_ARGS+=(--fail-on "$EOLUP_FAIL_ON")
+          if [ "$EOLUP_CHAIN" = "true" ]; then
             EXTRA_ARGS+=(--chain)
           fi
-          if [ "$RF_BUMP_PACKAGES" = "true" ]; then
+          if [ "$EOLUP_BUMP_PACKAGES" = "true" ]; then
             EXTRA_ARGS+=(--bump-packages)
           fi
         fi
         # github.action_path resolves to this repo checked out at whatever ref
-        # the caller pinned in `uses: winter-is-compiling/rollforward@<ref>` — no
-        # separate checkout of Rollforward's own source needed.
-        if [ -n "$RF_CLI" ]; then
-          "$RF_CLI" "$RF_COMMAND" "$TARGET_PATH" "${EXTRA_ARGS[@]}"
+        # the caller pinned in `uses: winter-is-compiling/eolup@<ref>` — no
+        # separate checkout of Eolup's own source needed.
+        if [ -n "$EOLUP_CLI" ]; then
+          "$EOLUP_CLI" "$EOLUP_COMMAND" "$TARGET_PATH" "${EXTRA_ARGS[@]}"
         else
-          dotnet run --project "${{ github.action_path }}/src/Rollforward.Cli" -- "$RF_COMMAND" "$TARGET_PATH" "${EXTRA_ARGS[@]}"
+          dotnet run --project "${{ github.action_path }}/src/Eolup.Cli" -- "$EOLUP_COMMAND" "$TARGET_PATH" "${EXTRA_ARGS[@]}"
         fi

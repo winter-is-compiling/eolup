@@ -1,5 +1,7 @@
 # Manual Test Passes
 
+> This log was written when the project was called Rollforward (renamed Eolup in v0.3.0). It is left as it was, so names and commands below are the old ones.
+
 Running Rollforward against real public repos, not just synthetic fixtures — per the strategy in [TESTING.md](TESTING.md), layer 3. Each pass is a deliberate choice of repos shaped differently from whatever's already been tested, to keep surfacing new blind spots rather than re-confirming known-good cases.
 
 ## Pass #1 — eShopOnWeb

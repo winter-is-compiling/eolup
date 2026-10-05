@@ -2,11 +2,11 @@
 # Read by scripts/test-against-reference-repos.sh — see reference-repos/README.md
 # for what each entry actually tests and its documented expected outcome.
 #
-# optional-config: path (relative to this directory) to a .rollforward.yml
+# optional-config: path (relative to this directory) to a .eolup.yml
 # template to copy into the cloned repo before running — simulates a real user
 # having added one, since we can't commit a config into someone else's repo
 # upstream. Leave blank if the repo needs no override.
-eShopOnWeb|https://github.com/dotnet-architecture/eShopOnWeb.git|4da8212117e87d808d4bbc7da6286fd2147ce606|configs/eShopOnWeb.rollforward.yml
+eShopOnWeb|https://github.com/dotnet-architecture/eShopOnWeb.git|4da8212117e87d808d4bbc7da6286fd2147ce606|configs/eShopOnWeb.eolup.yml
 Dapper|https://github.com/DapperLib/Dapper.git|8becae8d0e2b360165ae03c0d5d1330b0273473d|
 eShop|https://github.com/dotnet/eShop.git|b4a40872005d4bb29e5b1fa1ff7e244143d39215|
 PhotinoBlazorNet9Template|https://github.com/NathanJKW/Photino.Blazor.net9-template.git|ee3ed4a6dc0cab7f19b41a1c9d19cbb061fe1db8|

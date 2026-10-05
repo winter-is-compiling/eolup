@@ -2,13 +2,17 @@
 
 ## [Unreleased]
 
-## [0.2.1] — 2026-10-05
+## [0.3.0] — 2026-10-05
 
-Listing metadata only, so the Action can be published to the GitHub Marketplace. No change in behaviour.
+**Rollforward is now Eolup** — "continuous EOL upgrade". The name was changed before the first Marketplace listing: it collided with the .NET `RollForward` runtime setting in search, and it is tied to .NET and to accounting and database jargon, while the project is meant to cover more ecosystems. There are no other changes in behaviour, but the rename touches names you may have written down, so this is a minor release.
 
 ### Changed
 
-- The Action's name is now **Rollforward .NET Upgrade** (Marketplace requires a name that doesn't match an existing action, user or organisation, and `rollforward` is a user) and its description is shortened to fit Marketplace's 125-character limit. How you use it is unchanged: `uses: winter-is-compiling/rollforward@v0.2.1`.
+- **Command:** `rollforward` is now `eolup` (`eolup scan <path>`, `eolup remediate <path>`). Release binaries are `eolup-linux-x64`, `eolup-osx-arm64`, `eolup-osx-x64` and `eolup-win-x64`.
+- **Config file:** `.eolup.yml`. A `.rollforward.yml` is still read when there is no `.eolup.yml`, so existing repos keep working; the new name wins if both exist.
+- **Branches and commits:** the remediation branch is `eolup/upgrade-to-N`, and commits and pull requests are labelled Eolup. A leftover `rollforward/upgrade-to-N` branch from an earlier run isn't recognised as the same upgrade, so a repo with one open could get one extra PR the first time.
+- **GitHub Action:** named **Eolup** (`uses: winter-is-compiling/eolup@v0.3.0`); inputs are unchanged. The repository was renamed, and GitHub redirects the old URL, so workflows that reference the old name keep working.
+- **For provider authors:** the namespaces, assemblies and types moved from `Rollforward.*` to `Eolup.*` (`RollforwardEngine` is `EolupEngine`, `RollforwardConfig` is `EolupConfig`, and so on). Recompile against the new names.
 
 ## [0.2.0] — 2026-10-05
 

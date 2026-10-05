@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Clones each pinned repo in reference-repos/repos.list fresh, runs `rollforward
+# Clones each pinned repo in reference-repos/repos.list fresh, runs `eolup
 # scan` and `remediate` against it (once without any config, once with the
-# optional .rollforward.yml template applied if one is listed — simulating a real
+# optional .eolup.yml template applied if one is listed — simulating a real
 # user having added one, since we can't commit a config into someone else's repo
 # upstream), and prints the result for a human to compare against the documented
 # expected outcome in reference-repos/README.md.
@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIST="$REPO_ROOT/reference-repos/repos.list"
-CLI="$REPO_ROOT/src/Rollforward.Cli"
+CLI="$REPO_ROOT/src/Eolup.Cli"
 
 run_scan_and_remediate() {
   local dir="$1"
@@ -46,12 +46,12 @@ while IFS='|' read -r name url commit config; do
   # rejection as the safety net.
   git -C "$tmp" remote remove origin
 
-  echo "--- without any .rollforward.yml (repo's actual unmodified state) ---"
+  echo "--- without any .eolup.yml (repo's actual unmodified state) ---"
   run_scan_and_remediate "$tmp"
 
   if [[ -n "${config:-}" ]]; then
-    cp "$REPO_ROOT/reference-repos/$config" "$tmp/.rollforward.yml"
-    echo "--- with .rollforward.yml applied ($config) ---"
+    cp "$REPO_ROOT/reference-repos/$config" "$tmp/.eolup.yml"
+    echo "--- with .eolup.yml applied ($config) ---"
     run_scan_and_remediate "$tmp"
   fi
 

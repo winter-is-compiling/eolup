@@ -1,12 +1,12 @@
 # Reference Repos
 
-A small, version-pinned list of real public repositories Rollforward is periodically
+A small, version-pinned list of real public repositories Eolup is periodically
 re-validated against — deliberately kept separate from the fast, deterministic
 fixture suite in `/fixtures` (see [TESTING.md](../TESTING.md)).
 
 ## Why these are pinned to a commit, not "latest main"
 
-If a check against one of these ever fails, that should mean **Rollforward's
+If a check against one of these ever fails, that should mean **Eolup's
 behavior changed**, not that the upstream repo changed underneath us. Pin a
 specific commit when adding an entry, and only update the pin deliberately
 (e.g. to pull in a newer real-world pattern worth testing against).
@@ -27,12 +27,12 @@ scripts/test-against-reference-repos.sh
 Prints the actual `scan` and `remediate` output for each entry — once against the
 repo's real, unmodified state, and again with its optional config template
 applied if one is listed (simulating a real user having added their own
-`.rollforward.yml`, since we can't commit one into someone else's repo upstream).
+`.eolup.yml`, since we can't commit one into someone else's repo upstream).
 Compare it against
 the "expected outcome" documented per entry below — there's no automated
 pass/fail assertion here (unlike the fixture suite), because the whole point is
 surfacing real-world surprises for a human to look at, not enforcing a fixed
-verdict on code Rollforward doesn't own.
+verdict on code Eolup doesn't own.
 
 ## Entries
 
@@ -44,7 +44,7 @@ verdict on code Rollforward doesn't own.
   individual `.csproj`) and a `docker-compose.dcproj` sitting alongside its main
   `.sln` at the root.
 - **Why it's here**: this exact repo drove four real bug fixes — see
-  [MANUAL_TEST_PASS.md](../MANUAL_TEST_PASS.md). It's the closest thing Rollforward
+  [MANUAL_TEST_PASS.md](../MANUAL_TEST_PASS.md). It's the closest thing Eolup
   has to a regression suite against real-world repo structure, not just the
   synthetic patterns in `/fixtures`.
 - **Expected outcome, without any config** (the repo's actual, unmodified state —
@@ -53,7 +53,7 @@ verdict on code Rollforward doesn't own.
   .NET 10. `remediate` correctly **refuses to guess** and reports a clear error
   asking for a `solution:` override — this is the intended behavior for a
   genuinely ambiguous repo, not a bug.
-- **Expected outcome, with `configs/eShopOnWeb.rollforward.yml` applied**
+- **Expected outcome, with `configs/eShopOnWeb.eolup.yml` applied**
   (`solution: eShopOnWeb.sln`, simulating what a real user would add to their own
   copy of this repo): `remediate` reports **Blocked** — the real migration hits a
   genuine breaking change (`CS0433`: the `Program` type exists in both
@@ -70,7 +70,7 @@ verdict on code Rollforward doesn't own.
 ### eShop
 
 - **Commit pinned**: `b4a40872005d4bb29e5b1fa1ff7e244143d39215`
-- **What it stress-tests**: a genuine monorepo — 28 projects, mostly single-target `net10.0` services alongside a multi-targeted MAUI mobile client (`net10.0-android;net10.0-ios;net10.0-maccatalyst`, plus a Tizen variant). Successor to the now-archived `eShopOnContainers`. This is the *positive* counterpart to `fixture-version-mismatch`: many candidate projects, but the ones Rollforward can evaluate all agree, so it should proceed without complaint rather than over-triggering the version-mismatch check added after finding that bug.
+- **What it stress-tests**: a genuine monorepo — 28 projects, mostly single-target `net10.0` services alongside a multi-targeted MAUI mobile client (`net10.0-android;net10.0-ios;net10.0-maccatalyst`, plus a Tizen variant). Successor to the now-archived `eShopOnContainers`. This is the *positive* counterpart to `fixture-version-mismatch`: many candidate projects, but the ones Eolup can evaluate all agree, so it should proceed without complaint rather than over-triggering the version-mismatch check added after finding that bug.
 - **Why it's here**: this repo's own services all happen to agree on version, which is exactly why testing it alone wasn't enough to catch the version-mismatch bug — a constructed fixture (`fixture-version-mismatch`) was needed to actually reproduce and fix it. Kept here as a real-world check that the fix doesn't false-positive on a large, legitimately-agreeing multi-project repo. See [MANUAL_TEST_PASS.md, Pass #2](../MANUAL_TEST_PASS.md).
 - **Expected outcome, without any config**: `scan` reports `net10.0`, status `Current` (not yet approaching EOL). `remediate` should proceed past detection without a version-mismatch error — the multi-targeted MAUI client is excluded from the comparison (it can't be evaluated as a single TFM at all), and every single-target project agrees on `net10.0`. If this ever starts reporting an oldest version other than `net10.0`, or a note about projects on different versions, that's worth investigating (detection used to refuse such repos with a "multiple projects on different versions" error; it now uses the oldest version — see ARCHITECTURE.md, "Upgrades happen one hop per run").
 
@@ -85,15 +85,15 @@ verdict on code Rollforward doesn't own.
 
 Good candidates stress-test a real-world pattern the fixture suite doesn't
 already cover — not just "another repo that happens to build." Before adding one,
-have a one-sentence answer to "what does this repo do to Rollforward that nothing
+have a one-sentence answer to "what does this repo do to Eolup that nothing
 else here does yet?" Candidates worth considering next:
 
 Nothing is currently on this list — every candidate identified so far has been
 tried. If you think of a new one, the bar is the same: a one-sentence answer to
-what it does to Rollforward that nothing else here does yet.
+what it does to Eolup that nothing else here does yet.
 
 Already covered, so no longer needed on this list: a repo with a pinned SDK
-version Rollforward's environment doesn't have (Polly), a repo with a Windows-
+version Eolup's environment doesn't have (Polly), a repo with a Windows-
 suffixed TFM (ShareX, `net10.0-windows...` — turned out to already work
 correctly), a repo where the "first project found" heuristic picks something
 wrong (Dapper's traversal project, now fixed), a large monorepo with many
