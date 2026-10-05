@@ -43,6 +43,105 @@ public class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task AProcessThatOutlivesItsLimit_IsKilled_AndTheErrorSaysWhatRanAndWhatItHadWritten()
+    {
+        // Found by validating v0.3.0 on real repos: one fixed 5-minute limit for every child process killed
+        // legitimate restores, builds and test suites, and the error blamed "a lingering background process"
+        // without naming the command, the limit or what the process had been doing.
+        var (file, args) = OperatingSystem.IsWindows()
+            ? ("cmd", new[] { "/c", "echo started & ping -n 31 127.0.0.1 > nul" })
+            : ("sh", new[] { "-c", "echo started; sleep 30" });
+
+        var clock = Stopwatch.StartNew();
+        var error = await Assert.ThrowsAsync<ProcessTimeoutException>(
+            () => ProcessRunner.RunAsync(file, args, Path.GetTempPath(), TimeSpan.FromSeconds(2)));
+        clock.Stop();
+
+        Assert.Equal(file, error.Command);
+        Assert.Equal(TimeSpan.FromSeconds(2), error.Timeout);
+        Assert.Contains("started", error.PartialOutput);
+        Assert.Contains("did not finish within 2 seconds", error.Message);
+        Assert.DoesNotContain("lingering", error.Message);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(25),
+            $"Took {clock.Elapsed.TotalSeconds:0.#}s: the process should be killed at its limit, not run to its natural end.");
+    }
+
+    [Fact]
+    public async Task ACallerThatCancels_DoesNotLeaveTheProcessRunningBehindIt()
+    {
+        // Cancelling used to rethrow without killing the child: a `dotnet build` the caller had given up on kept
+        // running (and holding files) after the run was over. The child here would write a marker file after 6
+        // seconds if it were left alone.
+        var marker = Path.Combine(Path.GetTempPath(), "eolup-cancel-marker-" + Guid.NewGuid().ToString("N"));
+        var (file, args) = OperatingSystem.IsWindows()
+            ? ("cmd", new[] { "/c", $"ping -n 7 127.0.0.1 > nul & echo x > \"{marker}\"" })
+            : ("sh", new[] { "-c", $"sleep 6; echo x > '{marker}'" });
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => ProcessRunner.RunAsync(file, args, Path.GetTempPath(), cts.Token));
+
+            await Task.Delay(TimeSpan.FromSeconds(8)); // longer than the child needed to finish, had it survived
+            Assert.False(File.Exists(marker), "The cancelled process was still running and finished its work.");
+        }
+        finally
+        {
+            if (File.Exists(marker)) File.Delete(marker);
+        }
+    }
+
+    [Fact]
+    public async Task ATimeoutIsAUserError_SoAnUnhandledOneStillReachesTheCliAsACleanMessage()
+    {
+        var (file, args) = OperatingSystem.IsWindows()
+            ? ("cmd", new[] { "/c", "ping -n 31 127.0.0.1 > nul" })
+            : ("sh", new[] { "-c", "sleep 30" });
+
+        await Assert.ThrowsAsync<ProcessTimeoutException>(
+            () => ProcessRunner.RunAsync(file, args, Path.GetTempPath(), TimeSpan.FromSeconds(1)));
+
+        Assert.True(typeof(EolupUserException).IsAssignableFrom(typeof(ProcessTimeoutException)));
+    }
+
+    [Fact]
+    public async Task AProcessThatTakesLongerThanTheOldFixedLimitButFinishesInsideItsOwn_IsUnaffected()
+    {
+        // The limit is per call now: a healthy run that is merely slow completes as long as it fits its own limit.
+        var (file, args) = OperatingSystem.IsWindows()
+            ? ("cmd", new[] { "/c", "echo done & ping -n 4 127.0.0.1 > nul" })
+            : ("sh", new[] { "-c", "echo done; sleep 3" });
+
+        var result = await ProcessRunner.RunAsync(file, args, Path.GetTempPath(), TimeSpan.FromMinutes(10));
+
+        Assert.True(result.Succeeded);
+        Assert.Contains("done", result.StandardOutput);
+    }
+
+    [Theory]
+    [InlineData("dotnet", "test", "dotnet test")]
+    [InlineData("git", "rev-parse", "git rev-parse")]
+    [InlineData("C:\\Program Files\\dotnet\\dotnet.exe", "build", "dotnet build")]
+    [InlineData("sh", "-c", "sh")]
+    [InlineData("cmd", "/c", "cmd")]
+    [InlineData("dotnet", "--version", "dotnet")]
+    [InlineData("dotnet", null, "dotnet")]
+    [InlineData("dotnet", "C:\\repo\\App.sln", "dotnet")] // a path is not a subcommand and must not be echoed into a message
+    public void ACommandIsNamedByItsProgramAndSubcommand(string fileName, string? firstArgument, string expected) =>
+        Assert.Equal(expected, ProcessRunner.Describe(fileName, firstArgument));
+
+    [Fact]
+    public void ALimitIsDescribedInWords()
+    {
+        Assert.Equal("30 minutes", ProcessTimeoutException.Describe(TimeSpan.FromMinutes(30)));
+        Assert.Equal("1 minute", ProcessTimeoutException.Describe(TimeSpan.FromMinutes(1)));
+        Assert.Equal("90 seconds", ProcessTimeoutException.Describe(TimeSpan.FromSeconds(90)));
+        Assert.Equal("45 seconds", ProcessTimeoutException.Describe(TimeSpan.FromSeconds(45)));
+        Assert.Equal("1 second", ProcessTimeoutException.Describe(TimeSpan.FromMilliseconds(400)));
+    }
+
+    [Fact]
     public async Task CapturesOutputAndExitCode_OfAnOrdinaryProcess()
     {
         var (file, args) = OperatingSystem.IsWindows()

@@ -8,7 +8,9 @@ namespace Eolup.Core.Confidence;
 /// Deliberately a deterministic rule set, not a model score — see TESTING.md and
 /// ARCHITECTURE.md for why explainability matters more than sophistication here.
 ///
-/// Test coverage is judged in two tiers. A test project must exist (else Blocked).
+/// Test coverage is judged in two tiers. A test project must exist, and its tests must
+/// have run (else Blocked: a test command that succeeded without running anything says
+/// nothing about the change; <c>testsPassed</c> is null then).
 /// Then, when the provider could measure per-file line coverage: zero covered
 /// lines is Blocked (the tests pass but exercise nothing), and coverage below the
 /// configured minimum caps the verdict at NeedsReview. When coverage could not be
@@ -31,12 +33,18 @@ public static class ConfidenceScorer
         TestComparison? testComparison = null,
         IReadOnlyList<string>? frameworkAlignedPackages = null,
         IReadOnlyList<string>? packagesBumped = null,
-        IReadOnlyList<string>? unhelpfulPackageBumps = null)
+        IReadOnlyList<string>? unhelpfulPackageBumps = null,
+        string? unverifiable = null)
     {
         RemediationResult Result(ConfidenceVerdict verdict, List<string> reasons) =>
             new(verdict, reasons, buildSucceeded, testsPassed, testProjectExists, manualActionMarkers, branchName, coverage, testComparison);
 
         var packages = new PackageSignals(frameworkAlignedPackages, unhelpfulPackageBumps);
+
+        // A build or test run that was stopped for taking too long never produced an answer, so it can't
+        // vouch for the change. The provider says why (and how to give it more time) in its own words.
+        if (unverifiable is not null)
+            return Result(ConfidenceVerdict.Blocked, [unverifiable]);
 
         if (!buildSucceeded)
             return Result(ConfidenceVerdict.Blocked,
@@ -48,6 +56,13 @@ public static class ConfidenceScorer
 
         if (testsPassed == false)
             return ScoreFailedTests(testComparison, packages, Result);
+
+        // null from here on means the test command succeeded but ran no test: a test project switched off
+        // in the solution's build, or one with no tests in it. Nothing passed, so nothing vouches for the change.
+        if (testsPassed is null)
+            return Result(ConfidenceVerdict.Blocked,
+                ["The test command succeeded but ran no tests (the test projects may be switched off in the solution's build, " +
+                 "or contain no tests) — cannot verify the change is safe."]);
 
         if (coverage is { CoveredLines: 0 })
             return Result(ConfidenceVerdict.Blocked, AddBumpedPackages(

@@ -88,6 +88,45 @@ internal static partial class CsProjHelper
     }
 
     /// <summary>
+    /// Whether the declaration behind a project this run moves can be rewritten — checked before
+    /// anything is touched, so a repo that can't be migrated is refused cleanly instead of half-migrated.
+    /// A project with several entries is a &lt;TargetFrameworks&gt; list and needs a literal entry on
+    /// <paramref name="current"/> (see <see cref="CanRetargetFrameworks"/>). A project with ONE entry can be
+    /// spelled either way: &lt;TargetFramework&gt;net8.0&lt;/TargetFramework&gt;, or the plural element with a
+    /// single entry (Prowlarr, and many projects in MonoGame and workflow-core, do exactly that), so it
+    /// follows whichever the declaring file spells. A framework set through an import, or built from a
+    /// property, is neither, and can't be rewritten safely.
+    /// </summary>
+    public static bool CanRewriteTargetFramework(VersionPlanning.ProjectBump bump, Version current) =>
+        DeclaresSingularTargetFramework(bump) || CanRetargetFrameworks(bump.File, current);
+
+    /// <summary>
+    /// Rewrites the declaration <see cref="CanRewriteTargetFramework"/> found, keeping the form it was
+    /// written in (a one-entry plural list stays a plural list), and returns the file that holds it.
+    /// </summary>
+    public static string RewriteTargetFramework(VersionPlanning.ProjectBump bump, Version current, string targetTfm) =>
+        DeclaresSingularTargetFramework(bump)
+            ? WriteTargetFramework(bump.File, bump.NewTfm)
+            : WriteTargetFrameworks(bump.File, current, targetTfm);
+
+    /// <summary>
+    /// The file <see cref="RewriteTargetFramework"/> will edit for this project (null when there is none), so a
+    /// caller can keep that file's original bytes before the first edit.
+    /// </summary>
+    public static string? DeclarationFileOf(VersionPlanning.ProjectBump bump) =>
+        DeclaresSingularTargetFramework(bump)
+            ? FindTargetFrameworkDeclarationFile(bump.File)
+            : FindTargetFrameworkDeclarationFile(bump.File, "<TargetFrameworks");
+
+    /// <summary>
+    /// Only a project that evaluates to one entry can be a singular declaration: several entries are a list by
+    /// definition. When the singular element is spelled out anywhere that applies (the project, or a shared
+    /// props file above it), MSBuild builds a single target and ignores a plural element, so it is the one to edit.
+    /// </summary>
+    private static bool DeclaresSingularTargetFramework(VersionPlanning.ProjectBump bump) =>
+        !bump.MultiTarget && FindTargetFrameworkDeclarationFile(bump.File) is not null;
+
+    /// <summary>
     /// Rewrites every &lt;TargetFrameworks&gt; element (conditional ones included) in the
     /// file that declares a multi-targeted project's list, moving only the entries on
     /// <paramref name="current"/> — see <see cref="VersionPlanning.RetargetList"/>. Same

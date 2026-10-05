@@ -172,7 +172,11 @@ internal static partial class VersionPlanning
     /// whole new list (informational: the files are rewritten entry by entry, see
     /// <see cref="RetargetList"/>).
     /// </param>
-    /// <param name="MultiTarget">Whether it declares &lt;TargetFrameworks&gt; (plural).</param>
+    /// <param name="MultiTarget">
+    /// Whether its evaluated value lists several entries, so it is declared with &lt;TargetFrameworks&gt;. A
+    /// single entry can be spelled either way (&lt;TargetFramework&gt; or a one-entry &lt;TargetFrameworks&gt;), which
+    /// is why the writer follows the declaring file, not this flag: see <see cref="CsProjHelper.RewriteTargetFramework"/>.
+    /// </param>
     public sealed record ProjectBump(string File, string NewTfm, bool MultiTarget);
 
     /// <summary>

@@ -39,6 +39,66 @@ public class ConfidenceScorerTests
     }
 
     [Fact]
+    public void TestCommandThatRanNoTests_IsBlocked_NotHighConfidence()
+    {
+        // `dotnet test` can succeed without running anything (a test project switched off in the solution
+        // build, or one with no tests in it). testsPassed is null then: nothing passed, so nothing vouches
+        // for the change, and the verdict must not claim that "existing tests passed".
+        var result = ConfidenceScorer.Score(
+            buildSucceeded: true, testProjectExists: true, testsPassed: null,
+            manualActionMarkers: [], branchName: "b");
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
+        Assert.DoesNotContain(result.Reasons, r => r.Contains("tests passed"));
+    }
+
+    [Fact]
+    public void TestCommandThatRanNoTests_IsReportedAsThat_NotAsZeroCoverage()
+    {
+        // A project with no tests still gets instrumented, so a coverage report with nothing covered can
+        // exist. The honest reason is that no test ran, not that "tests passed" and covered no line.
+        var coverage = new CoverageReport([new FileCoverage("A.cs", 0, 10)]);
+
+        var result = ConfidenceScorer.Score(
+            buildSucceeded: true, testProjectExists: true, testsPassed: null,
+            manualActionMarkers: [], branchName: "b", coverage);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
+        Assert.DoesNotContain(result.Reasons, r => r.Contains("none of the"));
+    }
+
+    [Fact]
+    public void AStepStoppedForTakingTooLong_IsBlocked_WithTheProvidersOwnReason()
+    {
+        // A build or test run that was killed at its time limit produced no answer. It is neither a pass
+        // nor a failure, so nothing else about the run (not even a succeeded build) can lift the verdict.
+        const string reason = "The test run did not finish within 60 minutes ('dotnet test' was stopped), so the change can't be verified.";
+
+        var result = ConfidenceScorer.Score(
+            buildSucceeded: true, testProjectExists: true, testsPassed: null,
+            manualActionMarkers: [], branchName: "b", unverifiable: reason);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.Equal([reason], result.Reasons);
+    }
+
+    [Fact]
+    public void AStoppedBuild_IsReportedAsThat_NotAsAFailedBuild()
+    {
+        const string reason = "The build did not finish within 30 minutes ('dotnet build' was stopped), so the change can't be verified.";
+
+        var result = ConfidenceScorer.Score(
+            buildSucceeded: false, testProjectExists: true, testsPassed: null,
+            manualActionMarkers: [], branchName: "b", unverifiable: reason);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.Equal([reason], result.Reasons);
+        Assert.DoesNotContain(result.Reasons, r => r.Contains("Build failed"));
+    }
+
+    [Fact]
     public void ManualActionMarkersPresent_IsNeedsReview()
     {
         var result = ConfidenceScorer.Score(

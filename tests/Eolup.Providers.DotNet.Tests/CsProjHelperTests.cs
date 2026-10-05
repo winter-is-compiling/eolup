@@ -420,4 +420,122 @@ public class CsProjHelperTests
         Assert.False(CsProjHelper.CanRetargetFrameworks(viaProperty, new Version(6, 0)));
         Assert.True(CsProjHelper.CanRetargetFrameworks(literal, new Version(6, 0)));
     }
+
+    // ---------------------------------------------------------------- RewriteTargetFramework / CanRewriteTargetFramework
+
+    private static VersionPlanning.ProjectBump Bump(string file, string newTfm, bool multiTarget = false) =>
+        new(file, newTfm, multiTarget);
+
+    // Prowlarr, MonoGame and workflow-core declare <TargetFrameworks>net8.0</TargetFrameworks>: a plural
+    // element with ONE entry. It evaluates like a single target, but there is no singular element to find.
+    private const string SingleEntryPluralProject =
+        "<Project Sdk=\"Microsoft.NET.Sdk\">\r\n\r\n  <PropertyGroup>\r\n    <TargetFrameworks>net8.0</TargetFrameworks>\r\n" +
+        "    <Nullable>enable</Nullable>\r\n  </PropertyGroup>\r\n\r\n</Project>\r\n";
+
+    [Fact]
+    public void RewriteTargetFramework_SingleEntryPluralList_StaysPlural_LeavingTheRestOfTheFileByteIdentical()
+    {
+        using var dir = new TempDir();
+        var path = dir.Write("Lib.csproj", SingleEntryPluralProject, withBom: true);
+
+        var written = CsProjHelper.RewriteTargetFramework(Bump(path, "net10.0"), new Version(8, 0), "net10.0");
+
+        Assert.Equal(path, written);
+        Assert.Equal(SingleEntryPluralProject.Replace("net8.0", "net10.0"), File.ReadAllText(path));
+        Assert.Equal([0xEF, 0xBB, 0xBF], File.ReadAllBytes(path).Take(3).ToArray());
+    }
+
+    [Fact]
+    public void RewriteTargetFramework_SingleEntryPluralList_KeepsThePlatformSuffix()
+    {
+        using var dir = new TempDir();
+        var path = dir.Write("App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFrameworks>net8.0-windows</TargetFrameworks></PropertyGroup></Project>");
+
+        CsProjHelper.RewriteTargetFramework(Bump(path, "net10.0-windows"), new Version(8, 0), "net10.0");
+
+        Assert.Contains("<TargetFrameworks>net10.0-windows</TargetFrameworks>", File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void RewriteTargetFramework_SingleEntryPluralList_InASharedPropsFile_RewritesThatFile()
+    {
+        using var dir = new TempDir().AsRepoRoot();
+        const string props = "<Project>\r\n  <PropertyGroup>\r\n    <TargetFrameworks>net8.0</TargetFrameworks>\r\n  </PropertyGroup>\r\n</Project>\r\n";
+        var propsPath = dir.Write("Directory.Build.props", props);
+        var proj = dir.Write("src/App/App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+
+        var written = CsProjHelper.RewriteTargetFramework(Bump(proj, "net10.0"), new Version(8, 0), "net10.0");
+
+        Assert.Equal(propsPath, written);
+        Assert.Equal(props.Replace("net8.0", "net10.0"), File.ReadAllText(propsPath));
+        Assert.Equal("<Project Sdk=\"Microsoft.NET.Sdk\" />", File.ReadAllText(proj)); // project itself untouched
+    }
+
+    [Fact]
+    public void RewriteTargetFramework_SingularDeclaration_StillGoesThroughTheSingularElement()
+    {
+        using var dir = new TempDir();
+        var path = dir.Write("App.csproj", SingleTargetProject);
+
+        var written = CsProjHelper.RewriteTargetFramework(Bump(path, "net10.0"), new Version(8, 0), "net10.0");
+
+        Assert.Equal(path, written);
+        Assert.Equal(SingleTargetProject.Replace("net8.0", "net10.0"), File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void RewriteTargetFramework_ASingularDeclarationWinsOverAPluralOneElsewhere()
+    {
+        // When the project spells the singular element, MSBuild builds a single target and ignores the
+        // plural one in the shared file: the singular element is the declaration to edit.
+        using var dir = new TempDir().AsRepoRoot();
+        var propsPath = dir.Write("Directory.Build.props",
+            "<Project><PropertyGroup><TargetFrameworks>net6.0;netstandard2.0</TargetFrameworks></PropertyGroup></Project>");
+        var proj = dir.Write("src/App/App.csproj", SingleTargetProject);
+
+        CsProjHelper.RewriteTargetFramework(Bump(proj, "net10.0"), new Version(8, 0), "net10.0");
+
+        Assert.Contains("<TargetFramework>net10.0</TargetFramework>", File.ReadAllText(proj));
+        Assert.Contains("net6.0;netstandard2.0", File.ReadAllText(propsPath));
+    }
+
+    [Fact]
+    public void RewriteTargetFramework_AListWithSeveralEntries_IsRetargetedEntryByEntry()
+    {
+        using var dir = new TempDir();
+        var path = dir.Write("Lib.csproj", MultiTargetProject);
+
+        CsProjHelper.RewriteTargetFramework(Bump(path, "net8.0;netstandard2.0", multiTarget: true), new Version(6, 0), "net8.0");
+
+        Assert.Equal(MultiTargetProject.Replace(";net6.0<", ";net8.0<"), File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void CanRewriteTargetFramework_IsTrue_ForEverySpellingEolupCanWrite()
+    {
+        using var dir = new TempDir().AsRepoRoot();
+        dir.Write("shared/Directory.Build.props", "<Project><PropertyGroup><TargetFrameworks>net8.0</TargetFrameworks></PropertyGroup></Project>");
+        var singular = dir.Write("a/A.csproj", SingleTargetProject);
+        var pluralSingleEntry = dir.Write("b/B.csproj", SingleEntryPluralProject);
+        var viaProps = dir.Write("shared/C/C.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+
+        Assert.True(CsProjHelper.CanRewriteTargetFramework(Bump(singular, "net10.0"), new Version(8, 0)));
+        Assert.True(CsProjHelper.CanRewriteTargetFramework(Bump(pluralSingleEntry, "net10.0"), new Version(8, 0)));
+        Assert.True(CsProjHelper.CanRewriteTargetFramework(Bump(viaProps, "net10.0"), new Version(8, 0)));
+    }
+
+    [Fact]
+    public void CanRewriteTargetFramework_IsFalse_WhenTheFrameworkComesFromSomewhereEolupDoesNotEdit()
+    {
+        using var dir = new TempDir().AsRepoRoot();
+        dir.Write("build/framework.props", "<Project><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+        var viaImport = dir.Write("src/App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"../../build/framework.props\" /></Project>");
+        var viaProperty = dir.Write("src/Lib/Lib.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFrameworks>$(LibraryTarget)</TargetFrameworks></PropertyGroup></Project>");
+
+        Assert.False(CsProjHelper.CanRewriteTargetFramework(Bump(viaImport, "net10.0"), new Version(8, 0)));
+        Assert.False(CsProjHelper.CanRewriteTargetFramework(Bump(viaProperty, "net10.0"), new Version(8, 0)));
+    }
 }

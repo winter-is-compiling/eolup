@@ -31,4 +31,19 @@ public interface ILanguageProvider
     string FormatVersion(string cycle);
 
     Task<RemediationOutcome> RemediateAsync(string projectPath, string targetVersion, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Where the user's checkout stands right now (a branch name, or a commit when it is detached), captured before a
+    /// run so a run that fails can put it back. Null when there is nothing to put back. A provider that never touches
+    /// the checkout can leave this default.
+    /// </summary>
+    Task<string?> CaptureCheckoutAsync(string projectPath, CancellationToken cancellationToken = default) =>
+        Task.FromResult<string?>(null);
+
+    /// <summary>
+    /// Puts the checkout back where <see cref="CaptureCheckoutAsync"/> found it. Best effort, and it never throws: the run
+    /// has already failed, and this must not hide why. Returns what went wrong when it could not, otherwise null.
+    /// </summary>
+    Task<string?> RestoreCheckoutAsync(string projectPath, string checkout) =>
+        Task.FromResult<string?>(null);
 }

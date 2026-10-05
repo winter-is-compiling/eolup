@@ -11,15 +11,16 @@ public sealed record ProcessResult(int ExitCode, string StandardOutput, string S
 /// <summary>Shells out to an external tool (git, dotnet, etc.) and captures its output.</summary>
 public static class ProcessRunner
 {
-    // Generous but bounded: the largest real repo tested (a 28-project monorepo)
-    // builds in well under this. Exists purely so a hang becomes a clear,
-    // bounded failure instead of an indefinite one — see the node-reuse note
-    // below for why a hang can happen at all.
+    // What the quick commands get: git, gh, MSBuild property evaluation. Generous for those, and it
+    // exists purely so a hang becomes a clear, bounded failure instead of an indefinite one — see the
+    // node-reuse note below for why a hang can happen at all. A repo's own restore, build and test run
+    // are a different matter: they legitimately take tens of minutes, so their callers pass their own
+    // (configurable) limit to the overload that takes one.
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(5);
 
     public static Task<ProcessResult> RunAsync(
         string fileName, string arguments, string workingDirectory, CancellationToken cancellationToken = default) =>
-        RunAsync(fileName, new ProcessStartInfo(fileName, arguments), workingDirectory, cancellationToken);
+        RunAsync(fileName, new ProcessStartInfo(fileName, arguments), workingDirectory, DefaultTimeout, cancellationToken);
 
     /// <summary>
     /// Argument-list overload — use this instead of the plain-string overload whenever
@@ -27,15 +28,24 @@ public static class ProcessRunner
     /// since ArgumentList avoids manual shell-quoting bugs.
     /// </summary>
     public static Task<ProcessResult> RunAsync(
-        string fileName, IReadOnlyList<string> arguments, string workingDirectory, CancellationToken cancellationToken = default)
+        string fileName, IReadOnlyList<string> arguments, string workingDirectory, CancellationToken cancellationToken = default) =>
+        RunAsync(fileName, arguments, workingDirectory, DefaultTimeout, cancellationToken);
+
+    /// <summary>
+    /// As above, with the process's own time limit. A process still running when it expires is killed with its
+    /// whole process tree and a <see cref="ProcessTimeoutException"/> carrying what it had written so far is thrown.
+    /// </summary>
+    public static Task<ProcessResult> RunAsync(
+        string fileName, IReadOnlyList<string> arguments, string workingDirectory, TimeSpan timeout,
+        CancellationToken cancellationToken = default)
     {
         var startInfo = new ProcessStartInfo(fileName);
         foreach (var arg in arguments) startInfo.ArgumentList.Add(arg);
-        return RunAsync(fileName, startInfo, workingDirectory, cancellationToken);
+        return RunAsync(fileName, startInfo, workingDirectory, timeout, cancellationToken);
     }
 
     private static async Task<ProcessResult> RunAsync(
-        string fileName, ProcessStartInfo startInfo, string workingDirectory, CancellationToken cancellationToken)
+        string fileName, ProcessStartInfo startInfo, string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken)
     {
         startInfo.WorkingDirectory = workingDirectory;
         startInfo.RedirectStandardOutput = true;
@@ -74,20 +84,24 @@ public static class ProcessRunner
         var stdErrPump = stdErr.PumpAsync(process.StandardError);
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(DefaultTimeout);
+        timeoutCts.CancelAfter(timeout);
 
         try
         {
             await process.WaitForExitAsync(timeoutCts.Token);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // Timed out, not caller-cancelled: kill the whole process tree and fail
-            // loud with a clear, bounded error rather than let CI hang.
+            // Whoever stopped the wait (the caller, or the time limit), nothing may keep running: kill the whole
+            // process tree. A caller that gives up used to leave its `dotnet build` running behind it.
             TryKill(process);
-            throw new EolupUserException(
-                $"'{fileName}' did not complete within {DefaultTimeout.TotalMinutes:0} minutes and was killed. " +
-                "This may indicate a lingering background process (e.g. an MSBuild/compiler server) holding a pipe open.");
+
+            if (cancellationToken.IsCancellationRequested)
+                throw; // cancelled by the caller: nothing more to say
+
+            // Timed out: fail loud with what was running, how long it had, and what it had written — never a bare "hung".
+            await Task.WhenAny(Task.WhenAll(stdOutPump, stdErrPump), Task.Delay(TimeoutOutputGrace, CancellationToken.None));
+            throw new ProcessTimeoutException(Describe(fileName, startInfo), timeout, stdOut.Snapshot() + stdErr.Snapshot());
         }
 
         // The process has exited, but its output pipes only reach EOF once *every*
@@ -102,12 +116,33 @@ public static class ProcessRunner
         return new ProcessResult(process.ExitCode, stdOut.Snapshot(), stdErr.Snapshot());
     }
 
+    /// <summary>How long to wait, after killing a timed-out process, for its pipes to hand over the last of its output.</summary>
+    private static readonly TimeSpan TimeoutOutputGrace = TimeSpan.FromSeconds(2);
+
     /// <summary>
     /// How long to keep waiting for a finished process's output pipes to close before
     /// giving up on them and using the output captured so far. Internal so tests can
     /// shorten it.
     /// </summary>
     internal static TimeSpan OutputDrainGrace { get; set; } = TimeSpan.FromSeconds(30);
+
+    private static string Describe(string fileName, ProcessStartInfo startInfo) =>
+        Describe(fileName, startInfo.ArgumentList.Count > 0
+            ? startInfo.ArgumentList[0]
+            : startInfo.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault());
+
+    /// <summary>
+    /// The program and its subcommand, as a person would say it: "dotnet test", "git checkout". A first argument that
+    /// is an option ("-c", "/c", "--version") isn't a subcommand, and neither is anything long and path-like, so
+    /// those are left out rather than echoed into a message.
+    /// </summary>
+    internal static string Describe(string fileName, string? firstArgument)
+    {
+        var program = Path.GetFileNameWithoutExtension(fileName);
+        return firstArgument is { Length: > 0 and <= 24 } && firstArgument[0] is not ('-' or '/') && firstArgument.All(c => char.IsLetterOrDigit(c) || c == '-')
+            ? $"{program} {firstArgument}"
+            : program;
+    }
 
     private sealed class OutputBuffer
     {
