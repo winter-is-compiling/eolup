@@ -2,10 +2,22 @@
 
 ## [Unreleased]
 
-- Fixed: if the remediation branch (`rollforward/upgrade-to-N`) already existed, `remediate` failed to create it without saying so and committed the migration onto the branch you were on. A leftover local branch now makes it pick a free name (`-2`, `-3`, …, ignoring case). A branch of that name on a remote (an earlier run's PR is probably still open) stops the run with an explanation instead of opening a duplicate PR. A branch that still can't be created is an error before anything changes.
-- When the migration breaks the build or the tests, the verdict now names packages that version with the framework (ASP.NET Core, EF Core, `Microsoft.Extensions.*`, `System.Text.Json`) and are still on the old framework's major version — a common cause of post-upgrade failures, such as `Microsoft.AspNetCore.Mvc.Testing` 8.0.x on net10.0. It is a hint on a failure, never a verdict on its own: only the projects that were bumped are looked at, packages with their own version line (for example `Microsoft.AspNetCore.OData`, `Microsoft.Extensions.Http.Resilience`) and entries that already choose a version under a `Condition` are left out, and anything unreadable is skipped rather than failing the run.
-- New, opt-in: `--bump-packages` (`bumpPackages: true` in `.rollforward.yml`, `bump-packages: true` on the Action). If the framework bump alone breaks the build or tests, the framework-tied packages above are moved to the newest stable release on the target major (looked up on nuget.org) as a separate commit, and the build and tests run again. The bump is kept only if that passes, and the verdict lists every package that moved; otherwise the commit is dropped and the verdict says it was tried. Off by default. See the README's "Package bump" section for the limits.
-- For provider authors: `RemediationOutcome` gained optional trailing members (`FrameworkAlignedPackages`, `PackagesBumped`, `UnhelpfulPackageBumps`), and `DotNetLanguageProvider` has a constructor taking `bumpPackages`. Existing constructor calls still compile; positional deconstruction and already-compiled providers need a rebuild.
+## [0.2.0] — 2026-10-05
+
+An opt-in way to fix upgrades that fail because of packages left on the old framework, and a fix for a safety promise `remediate` wasn't keeping. **Pre-alpha, .NET only.**
+
+### New
+
+- **`--bump-packages`** (`bumpPackages: true` in `.rollforward.yml`, `bump-packages: true` on the Action). If the framework bump alone breaks the build or the tests, the packages that version with the framework (ASP.NET Core, EF Core, `Microsoft.Extensions.*`, `System.Text.Json`) are moved to the newest stable release on the target major, as a separate commit, and the build and tests run again. The bump is kept only if that passes, and the verdict lists every package that moved so the PR shows exactly what changed. Otherwise the commit is dropped, anything you had uncommitted is left alone, and the verdict says the bump was tried. Off by default. The README's "Package bump" section lists the limits (nuget.org only, no `$(Property)` versions, shared props files only when every project is being bumped).
+- **A hint when an upgrade fails.** When the migration breaks the build or the tests, the verdict now names packages that version with the framework and are still on the old major, a common cause of post-upgrade failures (for example `Microsoft.AspNetCore.Mvc.Testing` 8.x on net10.0). It is only a hint: it never changes a verdict, it is only shown when the migration is the likely cause, and it ignores packages with their own version line (such as `Microsoft.AspNetCore.OData`) and entries that already choose a version per target framework.
+
+### Fixed
+
+- If the remediation branch (`rollforward/upgrade-to-N`) already existed, `remediate` failed to create it without saying so and committed the migration onto the branch you were on. A leftover local branch now makes it pick a free name (`-2`, `-3`, …, ignoring case). A branch of that name on a remote (an earlier run's PR is probably still open) stops the run with an explanation instead of opening a duplicate PR. A branch that still can't be created is an error before anything changes.
+
+### For provider authors
+
+- `RemediationOutcome` gained optional trailing members (`FrameworkAlignedPackages`, `PackagesBumped`, `UnhelpfulPackageBumps`), and `DotNetLanguageProvider` has a constructor taking `bumpPackages`. Existing constructor calls still compile; positional deconstruction and already-compiled providers need a rebuild.
 
 ## [0.1.0] — 2026-09-28
 
