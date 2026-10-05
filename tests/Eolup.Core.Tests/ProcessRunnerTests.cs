@@ -67,6 +67,32 @@ public class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task ACallerThatCancels_DoesNotLeaveTheProcessRunningBehindIt()
+    {
+        // Cancelling used to rethrow without killing the child: a `dotnet build` the caller had given up on kept
+        // running (and holding files) after the run was over. The child here would write a marker file after 6
+        // seconds if it were left alone.
+        var marker = Path.Combine(Path.GetTempPath(), "eolup-cancel-marker-" + Guid.NewGuid().ToString("N"));
+        var (file, args) = OperatingSystem.IsWindows()
+            ? ("cmd", new[] { "/c", $"ping -n 7 127.0.0.1 > nul & echo x > \"{marker}\"" })
+            : ("sh", new[] { "-c", $"sleep 6; echo x > '{marker}'" });
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => ProcessRunner.RunAsync(file, args, Path.GetTempPath(), cts.Token));
+
+            await Task.Delay(TimeSpan.FromSeconds(8)); // longer than the child needed to finish, had it survived
+            Assert.False(File.Exists(marker), "The cancelled process was still running and finished its work.");
+        }
+        finally
+        {
+            if (File.Exists(marker)) File.Delete(marker);
+        }
+    }
+
+    [Fact]
     public async Task ATimeoutIsAUserError_SoAnUnhandledOneStillReachesTheCliAsACleanMessage()
     {
         var (file, args) = OperatingSystem.IsWindows()

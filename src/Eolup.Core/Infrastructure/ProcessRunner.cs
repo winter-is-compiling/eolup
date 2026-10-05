@@ -90,11 +90,16 @@ public static class ProcessRunner
         {
             await process.WaitForExitAsync(timeoutCts.Token);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // Timed out, not caller-cancelled: kill the whole process tree, then fail loud with
-            // what was running, how long it had, and what it had written — never a bare "hung".
+            // Whoever stopped the wait (the caller, or the time limit), nothing may keep running: kill the whole
+            // process tree. A caller that gives up used to leave its `dotnet build` running behind it.
             TryKill(process);
+
+            if (cancellationToken.IsCancellationRequested)
+                throw; // cancelled by the caller: nothing more to say
+
+            // Timed out: fail loud with what was running, how long it had, and what it had written — never a bare "hung".
             await Task.WhenAny(Task.WhenAll(stdOutPump, stdErrPump), Task.Delay(TimeoutOutputGrace, CancellationToken.None));
             throw new ProcessTimeoutException(Describe(fileName, startInfo), timeout, stdOut.Snapshot() + stdErr.Snapshot());
         }

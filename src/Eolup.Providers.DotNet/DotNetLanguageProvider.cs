@@ -123,7 +123,181 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
     /// <summary>The longest a repo's own build, and its test run, may take: what the caller asked for, else the repo's config, else the default.</summary>
     private sealed record Timeouts(TimeSpan Build, TimeSpan Test);
 
+    /// <summary>Test seam: runs right after the migration commit, so a test can fail or cancel the run at that exact point.</summary>
+    internal Func<Task>? AfterMigrationCommit { get; init; }
+
+    /// <summary>
+    /// What a run has done to the user's checkout so far: just enough to put it back if the run fails. Filled in by
+    /// <see cref="RemediateCoreAsync"/> as it goes, so the code that undoes a failure doesn't have to guess.
+    /// </summary>
+    private sealed class RunState
+    {
+        /// <summary>Where the checkout was before the run (a branch, or a commit when detached).</summary>
+        public string? StartedOn;
+
+        /// <summary>The commit the migration starts from.</summary>
+        public string BaseCommit = "";
+
+        /// <summary>The migration branch, once it exists. Null means nothing has been touched yet.</summary>
+        public string? BranchName;
+
+        /// <summary>Whether the migration commit was made. Until then the edits are uncommitted files.</summary>
+        public bool MigrationCommitted;
+
+        public readonly HashSet<string> ChangedFiles = [];
+        public readonly FileSnapshots Snapshots = new();
+    }
+
+    /// <summary>
+    /// The bytes of every file Eolup is about to rewrite, taken before its first edit, so a run that fails can put each
+    /// one back exactly as it was, including anything the user had uncommitted in that same file.
+    /// </summary>
+    private sealed class FileSnapshots
+    {
+        private readonly Dictionary<string, byte[]> _original =
+            new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+
+        public void Capture(string? path)
+        {
+            if (path is not null && !_original.ContainsKey(path) && File.Exists(path))
+                _original[path] = File.ReadAllBytes(path);
+        }
+
+        public void RestoreAll()
+        {
+            foreach (var (path, bytes) in _original)
+            {
+                try { File.WriteAllBytes(path, bytes); }
+                catch (IOException) { /* best effort: the run has already failed */ }
+                catch (UnauthorizedAccessException) { /* best effort */ }
+            }
+        }
+    }
+
     public async Task<RemediationOutcome> RemediateAsync(string projectPath, string targetVersion, CancellationToken cancellationToken = default)
+    {
+        var state = new RunState();
+        try
+        {
+            return await RemediateCoreAsync(projectPath, targetVersion, state, cancellationToken);
+        }
+        catch (Exception failure) when (state.BranchName is not null)
+        {
+            // Something was already done to the checkout (the branch exists), so undo it rather than leave the
+            // user on a half-migrated branch. A failure before that point changed nothing and flows through as it is.
+            var surfaced = await UndoAsync(failure, projectPath, state);
+            if (surfaced is null)
+                throw;
+            throw surfaced;
+        }
+    }
+
+    /// <summary>
+    /// A run failed after the migration branch was created. Puts the user's checkout back and says what it did: edits that
+    /// never made it into a commit go back byte for byte, the checkout returns to where the run started, and the branch is
+    /// removed when it holds nothing, or kept and named when it holds the migration. Never `reset --hard` or `clean`: the
+    /// user may have uncommitted work of their own. Returns the error to surface, or null to rethrow the original one
+    /// (a cancellation, which is put back quietly).
+    /// </summary>
+    private static async Task<Exception?> UndoAsync(Exception failure, string projectPath, RunState state)
+    {
+        var branch = state.BranchName!;
+
+        // Edits that never reached a commit: the original bytes go back, and whatever `git add` staged is unstaged.
+        if (!state.MigrationCommitted && state.ChangedFiles.Count > 0)
+        {
+            state.Snapshots.RestoreAll();
+            await TryRunAsync("git", ["reset", "--quiet", "--", .. state.ChangedFiles], projectPath);
+        }
+
+        // Does the migration branch hold anything beyond the commit the run started from?
+        var ahead = state.BaseCommit.Length == 0
+            ? null
+            : await TryRunAsync("git", ["rev-list", "--count", $"{state.BaseCommit}..{branch}"], projectPath);
+        var holdsCommits = state.BaseCommit.Length == 0
+            || ahead is not { Succeeded: true }
+            || !int.TryParse(ahead.StandardOutput.Trim(), out var count)
+            || count > 0;
+
+        // Back to where the user was.
+        string? problem = null;
+        if (state.StartedOn is not { } startedOn)
+        {
+            problem = "where the run started was not recorded";
+        }
+        else if (await CurrentCheckoutAsync(projectPath) != startedOn)
+        {
+            var back = await TryRunAsync("git", SwitchArguments(startedOn), projectPath);
+            if (back is not { Succeeded: true })
+                problem = back is null || back.StandardError.Trim().Length == 0 ? "git could not switch" : back.StandardError.Trim();
+        }
+
+        // A branch that holds nothing is just litter. Only removed once the checkout is off it.
+        var removed = false;
+        if (!holdsCommits && problem is null)
+            removed = (await TryRunAsync("git", ["branch", "-D", branch], projectPath)) is { Succeeded: true };
+
+        string note;
+        if (problem is not null)
+        {
+            note = $"Eolup could not put your checkout back{(state.StartedOn is { } s ? $" on {CheckoutRef.Describe(s)}" : "")}: {problem} " +
+                   $"The migration branch is '{branch}'; check out your own branch by hand.";
+        }
+        else
+        {
+            note = $"Eolup put your checkout back on {CheckoutRef.Describe(state.StartedOn!)}. " + (removed
+                ? $"The migration branch '{branch}' held no commit, so it was removed."
+                : holdsCommits
+                    ? $"The migration is committed on '{branch}', which was kept so you can look at it (`git branch -D {branch}` removes it)."
+                    : $"The empty migration branch '{branch}' could not be removed; `git branch -D {branch}` does it.");
+        }
+
+        if (failure is OperationCanceledException)
+            return null;
+
+        // The note goes on its own line: the failure's message may end in a hook's or a tool's raw output.
+        return failure is EolupUserException
+            ? new EolupUserException($"{failure.Message}\n{note}", failure)
+            : new EolupUserException($"Unexpected {failure.GetType().Name}: {failure.Message}\n{note}", failure);
+    }
+
+    /// <summary>A git (or other) command during an undo: it must never throw, and never uses the run's own cancellation token.</summary>
+    private static async Task<ProcessResult?> TryRunAsync(string fileName, IReadOnlyList<string> arguments, string workingDirectory)
+    {
+        try { return await ProcessRunner.RunAsync(fileName, arguments, workingDirectory, CancellationToken.None); }
+        catch (Exception e) when (e is not OutOfMemoryException) { return null; }
+    }
+
+    private static IReadOnlyList<string> SwitchArguments(string checkout) =>
+        CheckoutRef.IsCommit(checkout)
+            ? ["checkout", "--quiet", "--detach", checkout]
+            : ["checkout", "--quiet", checkout, "--"];
+
+    /// <summary>The branch the checkout is on, or the commit when HEAD is detached; null when this isn't a git checkout.</summary>
+    private static async Task<string?> CurrentCheckoutAsync(string projectPath)
+    {
+        var branch = await TryRunAsync("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], projectPath);
+        if (branch is { Succeeded: true } && branch.StandardOutput.Trim() is { Length: > 0 } name)
+            return name;
+
+        var commit = await TryRunAsync("git", ["rev-parse", "HEAD"], projectPath);
+        return commit is { Succeeded: true } && commit.StandardOutput.Trim() is { Length: > 0 } sha ? sha : null;
+    }
+
+    public Task<string?> CaptureCheckoutAsync(string projectPath, CancellationToken cancellationToken = default) =>
+        CurrentCheckoutAsync(projectPath);
+
+    public async Task<string?> RestoreCheckoutAsync(string projectPath, string checkout)
+    {
+        if (await CurrentCheckoutAsync(projectPath) == checkout)
+            return null;
+
+        var back = await TryRunAsync("git", SwitchArguments(checkout), projectPath);
+        return back is { Succeeded: true } ? null : back?.StandardError.Trim() is { Length: > 0 } error ? error : "git could not switch";
+    }
+
+    private async Task<RemediationOutcome> RemediateCoreAsync(
+        string projectPath, string targetVersion, RunState state, CancellationToken cancellationToken)
     {
         var config = EolupConfigLoader.Load(projectPath);
         var timeouts = new Timeouts(
@@ -238,13 +412,24 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         var baseCommit = (await ProcessRunner.RunAsync("git", ["rev-parse", "HEAD"], projectPath, cancellationToken))
             .StandardOutput.Trim();
 
-        var branchName = await CreateRemediationBranchAsync(projectPath, $"eolup/upgrade-to-{targetVersion}", cancellationToken);
+        // Where the user's checkout is before the first thing is touched: a failure from here on goes back to it.
+        state.StartedOn = await CurrentCheckoutAsync(projectPath);
+        state.BaseCommit = baseCommit;
 
-        var changedFiles = new HashSet<string>();
+        var branchName = await CreateRemediationBranchAsync(projectPath, $"eolup/upgrade-to-{targetVersion}", cancellationToken);
+        state.BranchName = branchName; // from this line on, a failure has something to put back
+
+        var changedFiles = state.ChangedFiles;
         foreach (var bump in projectsToBump)
+        {
+            state.Snapshots.Capture(CsProjHelper.DeclarationFileOf(bump)); // before the file is touched
             changedFiles.Add(CsProjHelper.RewriteTargetFramework(bump, currentVersion, targetTfm));
+        }
 
         await CommitMigrationAsync(projectPath, changedFiles, targetTfm, cancellationToken);
+        state.MigrationCommitted = true;
+        if (AfterMigrationCommit is { } afterCommit)
+            await afterCommit();
 
         var assessment = await AssessAsync(
             buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: true,

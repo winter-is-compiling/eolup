@@ -105,6 +105,15 @@ remediateCommand.SetAction(async (parseResult, cancellationToken) =>
             Console.WriteLine(prOutcome);
         }
 
+        // The run leaves the checkout on the last migration branch, whatever the verdict: say so, and how to go back.
+        if (run.StartedOn is { } startedOn && run.Final.Result.BranchName is { } onBranch && onBranch != startedOn)
+        {
+            Console.WriteLine();
+            Console.WriteLine(
+                $"You are now on branch '{onBranch}'. The run started on {CheckoutRef.Describe(startedOn)}; " +
+                $"`{CheckoutRef.WayBack(startedOn)}` goes back.");
+        }
+
         // Exit code 2 (distinct from 1 = error) so CI can tell "the tool ran fine but
         // the verdict trips the team's policy" from "the tool itself failed". Judged on
         // the last hop attempted — with chaining, the one that stopped the run.
@@ -150,6 +159,12 @@ static async Task<int> RunSafelyAsync(Func<Task<int>> action)
     catch (EolupUserException ex)
     {
         Console.Error.WriteLine($"Error: {ex.Message}");
+
+        // An unexpected failure is wrapped with a message that says what was put back; the original, with its
+        // stack trace, is one switch away for anyone who has to report it.
+        if (ex.InnerException is not null && Environment.GetEnvironmentVariable("EOLUP_DEBUG") == "1")
+            Console.Error.WriteLine(ex.InnerException);
+
         return 1;
     }
 }

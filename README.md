@@ -70,7 +70,7 @@ Reasons:
 
 **Coverage.** While your tests run, Eolup measures per-file line coverage of the code the migration recompiles (using [Coverlet](https://github.com/coverlet-coverage/coverlet), which the default xunit/NUnit/MSTest templates already reference as `coverlet.collector`). Tests that execute none of it → `Blocked`; coverage below `minCoverage` (default 50%) → `NeedsReview`, naming the least-covered files. If your test projects don't reference `coverlet.collector`, coverage can't be measured: the verdict is unchanged and says so explicitly.
 
-> **Safety, in plain terms**: your source code never leaves your machine or CI runner — nothing is uploaded anywhere. `remediate` always works on a new branch, never your current one. Even on `HighConfidence`, nothing merges automatically — a PR is opened for you to review like any other. Full reasoning in [SECURITY.md](SECURITY.md).
+> **Safety, in plain terms**: your source code never leaves your machine or CI runner — nothing is uploaded anywhere. `remediate` always works on a new branch, never your current one. When a run finishes you are left on that branch (the output says so, and how to go back); when a run fails or you stop it, your checkout and files are put back as they were, and the migration branch is kept (and named) only if it holds the migration commit. Even on `HighConfidence`, nothing merges automatically — a PR is opened for you to review like any other. Full reasoning in [SECURITY.md](SECURITY.md).
 
 ## See it in action
 

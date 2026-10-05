@@ -199,6 +199,135 @@ public class EolupEngineTests
         Assert.Equal(ConfidenceVerdict.HighConfidence, result.Verdict);
     }
 
+    // ------------------------------------------------------------------ putting the checkout back when a run fails
+
+    /// <summary>A provider that hands the checkout over like the .NET one, and fails the hop it is told to fail.</summary>
+    private sealed class FailingProvider(string start, string failingTarget, Exception failure, bool capturesCheckout = true) : ILanguageProvider
+    {
+        public string Current = start;
+        public readonly List<string> Restored = [];
+        public string? RestoreProblem;
+        public string ProductId => "dotnet";
+        public string FormatVersion(string cycle) => "net" + cycle;
+
+        public Task<VersionDetection> DetectVersionAsync(string projectPath, CancellationToken cancellationToken = default) =>
+            Task.FromResult(VersionDetection.Of(Current));
+
+        public Task<RemediationOutcome> RemediateAsync(string projectPath, string targetVersion, CancellationToken cancellationToken = default)
+        {
+            if (targetVersion == failingTarget)
+                throw failure;
+
+            Current = "net" + targetVersion;
+            return Task.FromResult(new RemediationOutcome(true, true, true, [], $"eolup/upgrade-to-{targetVersion}"));
+        }
+
+        public Task<string?> CaptureCheckoutAsync(string projectPath, CancellationToken cancellationToken = default) =>
+            Task.FromResult<string?>(capturesCheckout ? "main" : null);
+
+        public Task<string?> RestoreCheckoutAsync(string projectPath, string checkout)
+        {
+            Restored.Add(checkout);
+            return Task.FromResult(RestoreProblem);
+        }
+    }
+
+    [Fact]
+    public async Task Chain_WhoseSecondHopFails_PutsTheCheckoutBackWhereTheRunStarted_AndNamesTheStepThatFinished()
+    {
+        // Each hop leaves the checkout on its own branch, so the failing hop alone would only go back to the previous
+        // hop's. The run as a whole puts the user back where they started, and says that the first step is kept.
+        var original = new EolupUserException("The build exploded.");
+        var provider = new FailingProvider("net6.0", failingTarget: "10.0", original);
+        var engine = new EolupEngine(new CyclesEolClient(DotNetCycles), provider);
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => engine.RemediateChainAsync("."));
+
+        Assert.Equal(["main"], provider.Restored);
+        Assert.Contains("The build exploded.", error.Message);
+        Assert.Contains("'eolup/upgrade-to-8.0'", error.Message);
+        Assert.Contains("no pull request was opened", error.Message);
+        Assert.Contains("Your checkout is back on 'main'", error.Message);
+        Assert.Same(original, error.InnerException);
+    }
+
+    [Fact]
+    public async Task ASingleHopThatFails_IsPutBack_AndItsOwnErrorIsRethrownUnchanged()
+    {
+        // With one hop the provider's own message already says what it put back; the engine adds nothing.
+        var original = new EolupUserException("Could not commit the migration.");
+        var provider = new FailingProvider("net6.0", failingTarget: "8.0", original);
+        var engine = new EolupEngine(new CyclesEolClient(DotNetCycles), provider);
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => engine.RemediateAsync("."));
+
+        Assert.Same(original, error);
+        Assert.Equal(["main"], provider.Restored);
+    }
+
+    [Fact]
+    public async Task ACancelledRun_IsPutBackQuietly_AndStaysACancellation()
+    {
+        var provider = new FailingProvider("net6.0", failingTarget: "8.0", new OperationCanceledException());
+        var engine = new EolupEngine(new CyclesEolClient(DotNetCycles), provider);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => engine.RemediateAsync("."));
+
+        Assert.Equal(["main"], provider.Restored);
+    }
+
+    [Fact]
+    public async Task ACheckoutThatCannotBePutBack_IsReported_WithWhyAndWhereItIsNow()
+    {
+        var provider = new FailingProvider("net6.0", failingTarget: "8.0", new EolupUserException("The build exploded."))
+        {
+            RestoreProblem = "Your local changes would be overwritten by checkout."
+        };
+        var engine = new EolupEngine(new CyclesEolClient(DotNetCycles), provider);
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => engine.RemediateAsync("."));
+
+        Assert.Contains("The build exploded.", error.Message);
+        Assert.Contains("could not put your checkout back on 'main'", error.Message);
+        Assert.Contains("Your local changes would be overwritten", error.Message);
+    }
+
+    [Fact]
+    public async Task AProviderThatDoesNotCaptureTheCheckout_IsNeverAskedToRestoreIt()
+    {
+        var original = new EolupUserException("The build exploded.");
+        var provider = new FailingProvider("net6.0", failingTarget: "8.0", original, capturesCheckout: false);
+        var engine = new EolupEngine(new CyclesEolClient(DotNetCycles), provider);
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => engine.RemediateAsync("."));
+
+        Assert.Same(original, error);
+        Assert.Empty(provider.Restored);
+    }
+
+    [Fact]
+    public async Task ACompletedRun_RecordsWhereItStarted_AndNeverRestores()
+    {
+        // A run that completes (whatever the verdict) stays on the last migration branch; the output says how to go back.
+        var provider = new FailingProvider("net6.0", failingTarget: "none", new InvalidOperationException());
+        var engine = new EolupEngine(new CyclesEolClient(DotNetCycles), provider);
+
+        var run = await engine.RemediateChainAsync(".", maxHops: 1);
+
+        Assert.Equal("main", run.StartedOn);
+        Assert.Empty(provider.Restored);
+    }
+
+    [Theory]
+    [InlineData("main", "'main'", "git switch main")]
+    [InlineData("release/1.2", "'release/1.2'", "git switch release/1.2")]
+    [InlineData("0123456789abcdef0123456789abcdef01234567", "commit 0123456", "git switch --detach 0123456789abcdef0123456789abcdef01234567")]
+    public void ACheckoutIsDescribedAndHasAWayBack(string checkout, string described, string wayBack)
+    {
+        Assert.Equal(described, CheckoutRef.Describe(checkout));
+        Assert.Equal(wayBack, CheckoutRef.WayBack(checkout));
+    }
+
     [Fact]
     public async Task Chain_WithAnExplicitTarget_StopsOnceItIsReached()
     {

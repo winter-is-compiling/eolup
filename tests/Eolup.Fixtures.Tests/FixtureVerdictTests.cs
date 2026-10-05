@@ -414,6 +414,106 @@ public class FixtureVerdictTests
         Assert.Equal("1", await Git(path, "rev-list", "--count", $"{publishable}..eolup/upgrade-to-10.0"));
     }
 
+    // ------------------------------------------------------------------ a failed run puts the user's checkout back
+
+    private static async Task InstallHook(string repo, string name, string body)
+    {
+        var hook = Path.Combine(repo, ".git", "hooks", name);
+        await File.WriteAllTextAsync(hook, $"#!/bin/sh\n{body}\n");
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    [Fact]
+    public async Task ACommitRefusedByAHook_PutsTheCheckoutAndTheFilesBack_WithoutTouchingTheUsersOwnWork()
+    {
+        // Found by validating v0.3.0: any failure after the branch was created left the clone on eolup/upgrade-to-N,
+        // sometimes with edited, uncommitted project files (MonoGame: 10 of them). A commit hook refusing the
+        // migration commit is the most ordinary way to get there. The user's own uncommitted work, even inside the
+        // very project file that gets rewritten, must come back byte for byte: nothing here may use `reset --hard`.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var startBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        var before = await Git(path, "rev-parse", "HEAD");
+        await InstallHook(path, "pre-commit", "echo 'refused by the repo hook' >&2\nexit 1");
+
+        var greeter = Path.Combine(path, "src", "SampleApp", "Greeter.cs");
+        var project = Path.Combine(path, "src", "SampleApp", "SampleApp.csproj");
+        await File.AppendAllTextAsync(greeter, "// unrelated work in progress\n");
+        await File.AppendAllTextAsync(project, "<!-- my uncommitted note -->\n");
+        var greeterBefore = await File.ReadAllBytesAsync(greeter);
+        var projectBefore = await File.ReadAllBytesAsync(project);
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => CreateEngine().RemediateAsync(path));
+
+        Assert.Contains("Could not commit the migration", error.Message);
+        Assert.Contains($"put your checkout back on '{startBranch}'", error.Message);
+        Assert.Contains("held no commit, so it was removed", error.Message);
+        Assert.Equal(startBranch, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+        Assert.Equal(before, await Git(path, "rev-parse", "HEAD"));
+        Assert.Equal("", await Git(path, "branch", "--list", "eolup/*"));
+        Assert.Equal(greeterBefore, await File.ReadAllBytesAsync(greeter));
+        Assert.Equal(projectBefore, await File.ReadAllBytesAsync(project));
+        Assert.Equal(
+            ["M src/SampleApp/Greeter.cs", "M src/SampleApp/SampleApp.csproj"], // the user's two edits, and nothing else
+            (await Git(path, "status", "--porcelain", "--untracked-files=no")).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim()).Order());
+    }
+
+    [Fact]
+    public async Task AnUnexpectedFailureAfterTheMigrationCommit_KeepsTheBranch_NamesIt_AndPutsTheCheckoutBack()
+    {
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var startBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        var before = await Git(path, "rev-parse", "HEAD");
+        var provider = new DotNetLanguageProvider { AfterMigrationCommit = () => throw new InvalidOperationException("boom") };
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => new EolupEngine(new RecordedEolClient(), provider).RemediateAsync(path));
+
+        Assert.Contains("Unexpected InvalidOperationException: boom", error.Message);
+        Assert.Contains($"put your checkout back on '{startBranch}'", error.Message);
+        Assert.Contains("committed on 'eolup/upgrade-to-10.0', which was kept", error.Message);
+        Assert.IsType<InvalidOperationException>(error.InnerException);
+        Assert.Equal(startBranch, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+        Assert.Equal(before, await Git(path, "rev-parse", startBranch)); // the user's branch is untouched
+        Assert.Equal("eolup/upgrade-to-10.0", await Git(path, "branch", "--list", "eolup/*"));
+        Assert.Equal("1", await Git(path, "rev-list", "--count", $"{before}..eolup/upgrade-to-10.0"));
+        Assert.Equal("", await Git(path, "status", "--porcelain", "--untracked-files=no"));
+        Assert.Contains("net8.0", await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleApp", "SampleApp.csproj"))); // back on the old framework
+    }
+
+    [Fact]
+    public async Task ACancelledRun_PutsTheCheckoutBack_AndStaysACancellation()
+    {
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var startBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        using var cancel = new CancellationTokenSource();
+        var provider = new DotNetLanguageProvider { AfterMigrationCommit = () => { cancel.Cancel(); return Task.CompletedTask; } };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => new EolupEngine(new RecordedEolClient(), provider).RemediateAsync(path, cancel.Token));
+
+        Assert.Equal(startBranch, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+        Assert.Equal("eolup/upgrade-to-10.0", await Git(path, "branch", "--list", "eolup/*")); // it held the migration commit
+        Assert.Equal("", await Git(path, "status", "--porcelain", "--untracked-files=no"));
+    }
+
+    [Fact]
+    public async Task ACompletedRun_RecordsWhereItStarted_SoTheOutputCanSayHowToGoBack()
+    {
+        // A completed run leaves the checkout on the migration branch (whatever the verdict); the CLI says where it
+        // started and how to go back, from this.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var startBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+
+        var run = await CreateEngine().RemediateChainAsync(path);
+
+        Assert.Equal(startBranch, run.StartedOn);
+        Assert.Equal(run.Final.Result.BranchName, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+    }
+
     [Fact]
     public async Task ExistingRemediationBranch_IsNeverReused_AndTheCurrentBranchStaysUntouched()
     {
