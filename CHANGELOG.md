@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-05
+
+Listing metadata only, so the Action can be published to the GitHub Marketplace. No change in behaviour.
+
+### Changed
+
+- The Action's name is now **Rollforward .NET Upgrade** (Marketplace requires a name that doesn't match an existing action, user or organisation, and `rollforward` is a user) and its description is shortened to fit Marketplace's 125-character limit. How you use it is unchanged: `uses: winter-is-compiling/rollforward@v0.2.1`.
+
 ## [0.2.0] — 2026-10-05
 
 An opt-in way to fix upgrades that fail because of packages left on the old framework, and a fix for a safety promise `remediate` wasn't keeping. **Pre-alpha, .NET only.**

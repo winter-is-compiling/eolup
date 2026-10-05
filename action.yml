@@ -1,8 +1,5 @@
-name: 'Rollforward'
-description: >
-  Fleet-wide framework EOL scanning and confidence-scored migration.
-  Thin wrapper around the Rollforward CLI — see ARCHITECTURE.md for why the
-  logic lives in the CLI and this adapter stays minimal.
+name: 'Rollforward .NET Upgrade'
+description: 'Upgrade end-of-life .NET target frameworks and open a PR only when your own tests prove it is safe.'
 branding:
   icon: 'shield'
   color: 'blue'
