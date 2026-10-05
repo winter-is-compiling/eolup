@@ -42,21 +42,30 @@ var chainOption = new Option<bool>("--chain")
                   "stopping at the first that isn't. Same as `chain: true` in .rollforward.yml. Default: one hop per run.",
 };
 
+var bumpPackagesOption = new Option<bool>("--bump-packages")
+{
+    Description = "If the framework bump alone breaks the build or tests, move the packages that version with the " +
+                  "framework (ASP.NET Core, EF Core, Microsoft.Extensions.*) to the target major and re-run; kept only if " +
+                  "that makes the migration pass. Same as `bumpPackages: true` in .rollforward.yml. Default: off.",
+};
+
 var remediateCommand = new Command("remediate", "Attempt to migrate the project and report a confidence verdict.")
 {
     pathArgument,
     failOnOption,
-    chainOption
+    chainOption,
+    bumpPackagesOption
 };
 remediateCommand.SetAction(async (parseResult, cancellationToken) =>
 {
     var path = Path.GetFullPath(parseResult.GetValue(pathArgument)!);
     var failOn = parseResult.GetValue(failOnOption);
     var chainFlag = parseResult.GetValue(chainOption);
+    var bumpPackages = parseResult.GetValue(bumpPackagesOption);
     return await RunSafelyAsync(async () =>
     {
         var chain = chainFlag || RollforwardConfigLoader.Load(path).Chain;
-        var run = await CreateEngine().RemediateChainAsync(
+        var run = await CreateEngine(bumpPackages).RemediateChainAsync(
             path, chain ? RollforwardEngine.MaxChainHops : 1, cancellationToken);
         PrintRemediationRun(run);
 
@@ -101,8 +110,8 @@ var rootCommand = new RootCommand("Rollforward — fleet-wide framework EOL scan
 
 return await rootCommand.Parse(args).InvokeAsync();
 
-static RollforwardEngine CreateEngine() =>
-    new(new EndOfLifeDateClient(), new DotNetLanguageProvider());
+static RollforwardEngine CreateEngine(bool bumpPackages = false) =>
+    new(new EndOfLifeDateClient(), new DotNetLanguageProvider(bumpPackages));
 
 static async Task<int> RunSafelyAsync(Func<Task<int>> action)
 {

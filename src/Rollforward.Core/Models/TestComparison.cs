@@ -19,4 +19,17 @@ public sealed record TestComparison(
     bool BaselinePassed,
     IReadOnlyList<string> NewFailures,
     IReadOnlyList<string> AlreadyFailing,
-    bool FailuresIdentified);
+    bool FailuresIdentified)
+{
+    /// <summary>
+    /// Whether a failing suite should be blamed on the migration: no comparison could be made (so assume
+    /// it did), the suite passed before it, or specific tests newly fail. False when everything that fails
+    /// was already failing, or the untouched code gave nothing to compare against. The one rule behind
+    /// "name the stale packages" and "retry with a package bump" — both only make sense when the migration
+    /// is the likely cause.
+    /// </summary>
+    public static bool BlamesMigration(TestComparison? comparison) =>
+        comparison is null
+        || comparison.BaselinePassed
+        || (comparison.FailuresIdentified && comparison.NewFailures.Count > 0);
+}

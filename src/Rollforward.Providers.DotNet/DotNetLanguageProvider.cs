@@ -20,6 +20,28 @@ namespace Rollforward.Providers.DotNet;
 /// </summary>
 public sealed partial class DotNetLanguageProvider : ILanguageProvider
 {
+    private readonly bool _bumpPackages;
+    private IPackageVersionSource? _versionSource;
+
+    public DotNetLanguageProvider() : this(bumpPackages: false)
+    {
+    }
+
+    /// <param name="bumpPackages">
+    /// Opt in to the package bump: when the framework bump alone breaks the build or tests, move the
+    /// stale framework-aligned packages to the target major and re-run (`bumpPackages: true` in
+    /// .rollforward.yml does the same). Off by default.
+    /// </param>
+    public DotNetLanguageProvider(bool bumpPackages)
+    {
+        _bumpPackages = bumpPackages;
+    }
+
+    internal DotNetLanguageProvider(bool bumpPackages, IPackageVersionSource versionSource) : this(bumpPackages)
+    {
+        _versionSource = versionSource;
+    }
+
     public string ProductId => "dotnet";
 
     public string FormatVersion(string cycle) => CsProjHelper.CycleToTfm(cycle);
@@ -200,6 +222,127 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
         await CommitMigrationAsync(projectPath, changedFiles, targetTfm, cancellationToken);
 
+        var assessment = await AssessAsync(
+            buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: true, cancellationToken);
+
+        // Only looked for when something already failed: it explains a failure, it never creates one.
+        // And only in the projects this run moved — a project left on an older line on purpose
+        // (or already on a newer one) isn't what broke.
+        IReadOnlyList<string> frameworkAlignedPackages = [];
+        IReadOnlyList<string> packagesBumped = [];
+        IReadOnlyList<string> bumpDidNotHelp = [];
+        if (assessment.Failed)
+        {
+            var stale = FrameworkAlignedPackages.FindStale(projectPath, projectsToBump.Select(b => b.File), currentVersion.Major);
+
+            // Opt-in, and only when the migration is the likely culprit: a suite that was already failing
+            // on the untouched code can't be fixed by moving packages, so don't spend a retry on it.
+            IReadOnlyList<(StalePackage Package, string NewVersion)> edited = [];
+            var migrationBrokeIt = !assessment.Build.Succeeded || TestComparison.BlamesMigration(assessment.TestComparison);
+            if ((_bumpPackages || config.BumpPackages) && migrationBrokeIt)
+            {
+                // Shared props files reach every project, so they are only edited when every project is being moved.
+                var bumpable = FrameworkAlignedPackages.LimitToBumpedProjects(
+                    stale, CsProjHelper.FindProjectFiles(projectPath), projectsToBump.Select(b => b.File));
+
+                // Where the migration stands before any package is touched; a failed bump goes back to here.
+                var tfmCommit = (await ProcessRunner.RunAsync("git", ["rev-parse", "HEAD"], projectPath, cancellationToken))
+                    .StandardOutput.Trim();
+
+                edited = await BumpPackagesAsync(bumpable, VersionPlanning.TryParse(targetTfm)!.Major, projectPath, cancellationToken);
+
+                if (edited.Count > 0)
+                {
+                    // Bumping is judged by exactly the same build and tests as the framework bump. Kept only if
+                    // it makes the migration pass; otherwise our own commit is dropped, so the branch holds just
+                    // the framework change and nothing speculative. The baseline comparison isn't repeated: the
+                    // untouched code's result can't have changed, and a dropped retry's comparison is discarded.
+                    var retry = await AssessAsync(
+                        buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: false, cancellationToken);
+                    if (!retry.Failed)
+                    {
+                        assessment = retry;
+                        packagesBumped = edited.Select(DescribeBump).ToList();
+                    }
+                    else
+                    {
+                        // --keep, not --hard: anything the user had uncommitted in the working tree when they ran
+                        // Rollforward came along onto this branch, and must survive; it only drops our own commit.
+                        var drop = await ProcessRunner.RunAsync("git", ["reset", "--keep", tfmCommit], projectPath, cancellationToken);
+                        if (!drop.Succeeded)
+                            throw new RollforwardUserException(
+                                $"Bumping the framework-aligned packages didn't fix the failure, and Rollforward couldn't drop its own commit " +
+                                $"again: {drop.StandardError.Trim()} The branch '{branchName}' still holds it; reset it to {tfmCommit} by hand.");
+                        bumpDidNotHelp = edited.Select(DescribeBump).ToList();
+                    }
+                }
+            }
+
+            var editedPackages = edited.Select(e => e.Package).ToHashSet();
+            frameworkAlignedPackages = stale.Where(p => !editedPackages.Contains(p)).Select(p => p.Describe()).ToList();
+        }
+
+        return new RemediationOutcome(
+            assessment.Build.Succeeded, testProjectExists, assessment.TestsPassed, assessment.ManualActionMarkers, branchName,
+            assessment.Coverage, assessment.TestComparison, frameworkAlignedPackages, packagesBumped, bumpDidNotHelp);
+    }
+
+    private static string DescribeBump((StalePackage Package, string NewVersion) bump) =>
+        $"{bump.Package.Id} {bump.Package.Version} → {bump.NewVersion} ({bump.Package.RelativePath})";
+
+    /// <summary>
+    /// Moves the stale framework-aligned packages to the newest stable release on the target
+    /// framework's major and commits that as its own commit, returning what was changed (empty when
+    /// nothing could be: no stale package, none resolvable on nuget.org, or no entry that could be edited).
+    /// All of them move together — bumping just one often trips NuGet's downgrade check (NU1605)
+    /// because the newer package pulls in newer siblings than the ones still pinned.
+    /// </summary>
+    private async Task<IReadOnlyList<(StalePackage Package, string NewVersion)>> BumpPackagesAsync(
+        IReadOnlyList<StalePackage> stale, int targetMajor, string projectPath, CancellationToken cancellationToken)
+    {
+        if (stale.Count == 0)
+            return [];
+
+        var source = _versionSource ??= new NuGetOrgVersionSource();
+        var resolved = await Task.WhenAll(stale.Select(p => p.Id).Distinct(StringComparer.OrdinalIgnoreCase).Select(async id =>
+            (Id: id, Version: await PackageVersionResolver.LatestStableOnMajorAsync(source, id, targetMajor, cancellationToken))));
+        var versions = resolved
+            .Where(r => r.Version is not null)
+            .ToDictionary(r => r.Id, r => r.Version!, StringComparer.OrdinalIgnoreCase);
+        if (versions.Count == 0)
+            return [];
+
+        var result = PackageVersionEditor.Apply(stale, versions);
+        if (result.ChangedFiles.Count == 0)
+            return [];
+
+        try
+        {
+            await CommitFilesAsync(projectPath, result.ChangedFiles, $"Rollforward: align framework packages to {targetMajor}.x", cancellationToken);
+        }
+        catch (RollforwardUserException)
+        {
+            // An optional retry must never fail the run: a commit hook, signing setup or git itself refused it.
+            // Put the files back as the framework-bump commit left them and carry on with the verdict already earned.
+            await ProcessRunner.RunAsync("git", ["checkout", "HEAD", "--", .. result.ChangedFiles], projectPath, cancellationToken);
+            return [];
+        }
+
+        var notEdited = result.NotEdited.ToHashSet();
+        return stale.Where(p => !notEdited.Contains(p)).Select(p => (p, versions[p.Id])).ToList();
+    }
+
+    /// <summary>What one build-and-test pass of the migrated code showed.</summary>
+    private sealed record Assessment(
+        ProcessResult Build, IReadOnlyList<string> ManualActionMarkers, bool? TestsPassed, CoverageReport? Coverage, TestComparison? TestComparison)
+    {
+        public bool Failed => !Build.Succeeded || TestsPassed == false;
+    }
+
+    private static async Task<Assessment> AssessAsync(
+        string buildTarget, string projectPath, bool testProjectExists, HashSet<string> baselineMarkers,
+        string baseCommit, string branchName, bool compareWithBaseline, CancellationToken cancellationToken)
+    {
         var buildResult = await ProcessRunner.RunAsync("dotnet", ["build", buildTarget], projectPath, cancellationToken);
         var manualActionMarkers = buildResult.Succeeded
             ? ExtractObsoleteWarnings(buildResult.StandardOutput)
@@ -239,7 +382,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
                     // Still failing: find out whether it was already failing before
                     // the migration touched anything.
-                    if (!plain.Succeeded)
+                    if (!plain.Succeeded && compareWithBaseline)
                         testComparison = await CompareWithBaselineAsync(
                             plain, baseCommit, branchName, buildTarget, projectPath, cancellationToken);
                 }
@@ -259,16 +402,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
             }
         }
 
-        // Only looked for when something already failed: it explains a failure, it never creates one.
-        // And only in the projects this run moved — a project left on an older line on purpose
-        // (or already on a newer one) isn't what broke.
-        var frameworkAlignedPackages = !buildResult.Succeeded || testsPassed == false
-            ? FrameworkAlignedPackages.Find(projectPath, projectsToBump.Select(b => b.File), currentVersion.Major)
-            : [];
-
-        return new RemediationOutcome(
-            buildResult.Succeeded, testProjectExists, testsPassed, manualActionMarkers, branchName, coverage, testComparison,
-            frameworkAlignedPackages);
+        return new Assessment(buildResult, manualActionMarkers, testsPassed, coverage, testComparison);
     }
 
     /// <summary>
@@ -418,8 +552,13 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
     /// fail — that's the migration's actual state, on a branch that's ours, and the
     /// verdict (not the commit) decides whether a PR is opened.
     /// </summary>
-    private static async Task CommitMigrationAsync(
-        string projectPath, IReadOnlyCollection<string> changedFiles, string targetTfm, CancellationToken cancellationToken)
+    private static Task CommitMigrationAsync(
+        string projectPath, IReadOnlyCollection<string> changedFiles, string targetTfm, CancellationToken cancellationToken) =>
+        CommitFilesAsync(projectPath, changedFiles, $"Rollforward: upgrade target framework to {targetTfm}", cancellationToken);
+
+    /// <summary>Stages exactly <paramref name="changedFiles"/> and commits them with <paramref name="message"/>; see <see cref="CommitMigrationAsync"/> for why.</summary>
+    private static async Task CommitFilesAsync(
+        string projectPath, IReadOnlyCollection<string> changedFiles, string message, CancellationToken cancellationToken)
     {
         if (changedFiles.Count == 0) return;
 
@@ -440,7 +579,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         List<string> identity = hasIdentity ? [] : ["-c", "user.name=Rollforward", "-c", "user.email=rollforward@users.noreply.github.com"];
 
         var commit = await ProcessRunner.RunAsync(
-            "git", [.. identity, "commit", "-m", $"Rollforward: upgrade target framework to {targetTfm}"],
+            "git", [.. identity, "commit", "-m", message],
             projectPath, cancellationToken);
         if (!commit.Succeeded)
             throw new RollforwardUserException(

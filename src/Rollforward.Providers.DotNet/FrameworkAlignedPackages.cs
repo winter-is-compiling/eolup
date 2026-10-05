@@ -72,6 +72,23 @@ internal static partial class FrameworkAlignedPackages
         FindStale(root, projectFiles, oldMajor).Select(p => p.Describe()).ToList();
 
     /// <summary>
+    /// The stale packages it is safe to rewrite. Entries in a project file being bumped always are; entries in a
+    /// shared file (Directory.Packages.props, Directory.Build.props/targets) reach every project under it, so
+    /// they only are when every project in the repo is being bumped — otherwise editing them would change the
+    /// dependencies of projects this run is deliberately not touching.
+    /// </summary>
+    public static IReadOnlyList<StalePackage> LimitToBumpedProjects(
+        IReadOnlyList<StalePackage> stale, IEnumerable<string> allProjectFiles, IEnumerable<string> bumpedProjectFiles)
+    {
+        var bumped = bumpedProjectFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var everyProjectIsBumped = allProjectFiles.All(bumped.Contains);
+
+        return everyProjectIsBumped
+            ? stale
+            : stale.Where(p => bumped.Contains(p.File)).ToList();
+    }
+
+    /// <summary>
     /// Same search as <see cref="Find"/>, but returning where each package is declared so
     /// <see cref="PackageVersionEditor"/> can rewrite exactly that entry.
     /// </summary>

@@ -22,6 +22,7 @@ It scans a .NET project for outdated, end-of-life framework versions, tells you 
     path: .              # optional — defaults to the workflow's own checkout
     fail-on: needs-review  # remediate only: none (default) | blocked | needs-review
     chain: true            # remediate only: keep going hop by hop while each is HighConfidence (default: false)
+    bump-packages: true    # remediate only: retry with framework-tied packages moved to the new major if the bump alone fails (default: false)
 ```
 
 See [action.yml](action.yml) — it's a thin composite action. Pinned to a release tag it downloads that release's pre-built binary (checksum-verified); pinned to a branch or commit it builds the CLI from source. It's dogfooded against this repo's own fixtures in [`.github/workflows/self-test-action.yml`](.github/workflows/self-test-action.yml).
@@ -30,11 +31,11 @@ See [action.yml](action.yml) — it's a thin composite action. Pinned to a relea
 
 ```bash
 rollforward scan <path>
-rollforward remediate <path> [--fail-on none|blocked|needs-review] [--chain]
+rollforward remediate <path> [--fail-on none|blocked|needs-review] [--chain] [--bump-packages]
 
 # from source:
 dotnet run --project src/Rollforward.Cli -- scan <path>
-dotnet run --project src/Rollforward.Cli -- remediate <path> [--fail-on none|blocked|needs-review] [--chain]
+dotnet run --project src/Rollforward.Cli -- remediate <path> [--fail-on none|blocked|needs-review] [--chain] [--bump-packages]
 ```
 
 Exit codes: `0` success, `1` an error Rollforward could explain (bad path, project doesn't build, ...), `2` the verdict tripped `--fail-on`. By default a verdict never fails the run — whether "needs review" or "blocked" should turn your pipeline red is your policy, not ours.
@@ -76,7 +77,7 @@ Reasons:
   - Build succeeded, existing tests passed (line coverage 82.7%), no manual-action markers — safe to auto-approve.
 ```
 
-The safety net matters as much as the happy path. While building this demo, an earlier version of its API tests pinned `Microsoft.AspNetCore.Mvc.Testing` to 8.0.x. After the bump, two tests failed on net10, so Rollforward returned `NeedsReview` and named the failing tests instead of opening a PR. The demo now makes that package follow the target framework, and the gap is tracked in [#1](https://github.com/winter-is-compiling/rollforward/issues/1).
+The safety net matters as much as the happy path. While building this demo, an earlier version of its API tests pinned `Microsoft.AspNetCore.Mvc.Testing` to 8.0.x. After the bump, two tests failed on net10, so Rollforward returned `NeedsReview` and named the failing tests instead of opening a PR. The demo now makes that package follow the target framework. Rollforward also names such packages when an upgrade fails, and with `--bump-packages` it retries with them moved to the new major (see [Package bump](#package-bump-opt-in)); the work is tracked in [#1](https://github.com/winter-is-compiling/rollforward/issues/1).
 
 ## How it compares
 
@@ -84,7 +85,7 @@ The safety net matters as much as the happy path. While building this demo, an e
 |---|---|---|---|
 | Form | CLI + GitHub Action | .NET global tool | Agent in Visual Studio, VS Code, Copilot CLI |
 | Upgrades `TargetFramework` | yes, one hop at a time (`--chain` to continue) | yes | yes |
-| Also updates packages, `global.json`, Dockerfiles | not yet ([#1](https://github.com/winter-is-compiling/rollforward/issues/1)) | yes | assessed and planned as part of its workflow |
+| Also updates packages, `global.json`, Dockerfiles | framework-tied packages only, opt-in, and only to fix a failed upgrade (`--bump-packages`); no `global.json` or Dockerfiles | yes | assessed and planned as part of its workflow |
 | Runs your tests | always; build + tests + coverage decide the verdict | optional (`--test`) | part of its guided or automatic workflow |
 | Opens a PR | automatically, only on `HighConfidence` | not part of the tool as documented | works on a branch you choose up front |
 | Hard cases | `NeedsReview` / `Blocked`, with reasons | best-effort, review the changes | interactive, you steer |
@@ -109,7 +110,23 @@ chain: true            # optional — keep upgrading hop by hop (net6 -> net8 ->
 minCoverage: 50        # optional — line-coverage percentage of the migrated code
                         # below which a verdict is capped at NeedsReview (default 50;
                         # 0 turns that rule off — zero coverage is still Blocked)
+
+bumpPackages: true     # optional — if the framework bump alone breaks the build or tests, move the
+                        # packages that version with the framework (ASP.NET Core, EF Core,
+                        # Microsoft.Extensions.*) to the target major and re-run; default: off
 ```
+
+### Package bump (opt-in)
+
+A target-framework bump leaves packages that version with the framework on the old major, and that can break an otherwise clean upgrade (for example `Microsoft.AspNetCore.Mvc.Testing` 8.x on net10.0). Without the opt-in, Rollforward only **names** such packages in the verdict when the build or tests fail. With `--bump-packages` (or `bumpPackages: true`, or the Action's `bump-packages: true`) it also tries to fix it:
+
+1. It makes the framework bump and builds and tests as usual.
+2. Only if that fails, and framework-tied packages are still on the old major, it moves them all to the newest stable release on the new major, as a **separate commit**, and builds and tests again.
+3. If that passes, the bump is kept and the verdict lists every package that moved, so the PR shows exactly what changed. If it still fails, the commit is dropped, the branch holds only the framework bump, and the verdict says the bump was tried. Dropping it only removes Rollforward's own commit: anything you had uncommitted in your working tree is left alone.
+
+It is only tried when the migration is the likely cause: a suite that was already failing on the untouched code isn't retried. And if git refuses the bump commit (a hook, signing), the bump is skipped and the run ends with the verdict the framework bump earned.
+
+Limits for now: versions are looked up on nuget.org only (a package that exists only on a private feed isn't bumped); versions set through an MSBuild property (`$(Version)`) aren't edited; only packages in the framework-tied families are touched; and entries in shared files (`Directory.Packages.props`, `Directory.Build.props`) are edited only when every project in the repo is being bumped, because those files reach projects the run isn't touching.
 
 ## Requirements
 

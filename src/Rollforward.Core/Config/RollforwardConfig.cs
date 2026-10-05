@@ -27,6 +27,15 @@ public sealed class RollforwardConfig
     public bool Chain { get; set; }
 
     /// <summary>
+    /// When the framework bump alone breaks the build or the tests, move the packages that version
+    /// with the framework (ASP.NET Core, EF Core, Microsoft.Extensions.*) to the target major and
+    /// re-run; the bump is kept only if that makes the migration pass. Off by default: nothing but the
+    /// target framework changes unless this is on. YAML key: `bumpPackages`. The CLI's
+    /// `--bump-packages` flag turns it on too.
+    /// </summary>
+    public bool BumpPackages { get; set; }
+
+    /// <summary>
     /// Minimum line coverage (percent, of the non-test source the migration recompiles)
     /// below which a verdict is capped at NeedsReview. Zero coverage is always Blocked.
     /// Only applies when coverage could be measured. YAML key: `minCoverage`.

@@ -30,4 +30,11 @@ public class RollforwardConfigTests
         Assert.False(LoadYaml(null).Chain);
         Assert.True(LoadYaml("chain: true\n").Chain);
     }
+
+    [Fact]
+    public void BumpPackages_IsOffByDefault_AndReadFromTheBumpPackagesKey()
+    {
+        Assert.False(LoadYaml(null).BumpPackages);
+        Assert.True(LoadYaml("bumpPackages: true\n").BumpPackages);
+    }
 }

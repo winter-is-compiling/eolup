@@ -91,6 +91,8 @@ public sealed class RollforwardEngine(IEolClient eolClient, ILanguageProvider pr
             outcome.Coverage,
             config.MinCoverage,
             outcome.TestComparison,
-            outcome.FrameworkAlignedPackages);
+            outcome.FrameworkAlignedPackages,
+            outcome.PackagesBumped,
+            outcome.UnhelpfulPackageBumps);
     }
 }

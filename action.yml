@@ -33,6 +33,15 @@ inputs:
       Ignored by `scan`.
     required: false
     default: 'false'
+  bump-packages:
+    description: >
+      'true' to retry with the packages that version with the framework (ASP.NET Core,
+      EF Core, Microsoft.Extensions.*) moved to the target major when the framework bump
+      alone breaks the build or tests. The bump is its own commit and is kept only if the
+      retry passes. Default 'false': nothing but the target framework changes.
+      Ignored by `scan`.
+    required: false
+    default: 'false'
   version:
     description: >
       Which release's pre-built `rollforward` binary to use, e.g. 'v0.1.0' or
@@ -122,6 +131,7 @@ runs:
         RF_PATH: ${{ inputs.path }}
         RF_FAIL_ON: ${{ inputs.fail-on }}
         RF_CHAIN: ${{ inputs.chain }}
+        RF_BUMP_PACKAGES: ${{ inputs.bump-packages }}
         RF_CLI: ${{ steps.cli.outputs.path }}
       run: |
         TARGET_PATH="$RF_PATH"
@@ -133,6 +143,9 @@ runs:
           EXTRA_ARGS+=(--fail-on "$RF_FAIL_ON")
           if [ "$RF_CHAIN" = "true" ]; then
             EXTRA_ARGS+=(--chain)
+          fi
+          if [ "$RF_BUMP_PACKAGES" = "true" ]; then
+            EXTRA_ARGS+=(--bump-packages)
           fi
         fi
         # github.action_path resolves to this repo checked out at whatever ref
