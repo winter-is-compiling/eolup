@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <!-- Part of the solution, but not built by it: `dotnet test <solution>` succeeds without running anything
+         (netch's shape: a test project whose build is switched off in the solution configuration). -->
+    <Project Path="src/SampleApp.Tests/SampleApp.Tests.csproj">
+      <Build Project="false" />
+    </Project>
+    <Project Path="src/SampleApp/SampleApp.csproj" />
+  </Folder>
+</Solution>

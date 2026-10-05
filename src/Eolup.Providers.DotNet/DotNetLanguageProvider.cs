@@ -364,7 +364,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
             var run = await RunTestsAsync(buildTarget, projectPath, collectCoverage: true, cancellationToken);
             try
             {
-                testsPassed = run.Succeeded;
+                testsPassed = Outcome(run);
 
                 // Coverage instrumentation can itself break tests that pass normally:
                 // Coverlet injects a helper type into each instrumented assembly, and
@@ -375,25 +375,23 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
                 // So a failure here is never trusted on its own: confirm with a plain
                 // run, which alone decides pass/fail. Coverage is then just "not
                 // measured" — a measurement problem must not become a verdict.
-                if (!run.Succeeded)
+                if (testsPassed == false)
                 {
                     using var plain = await RunTestsAsync(buildTarget, projectPath, collectCoverage: false, cancellationToken);
-                    testsPassed = plain.Succeeded;
+                    testsPassed = Outcome(plain);
 
                     // Still failing: find out whether it was already failing before
                     // the migration touched anything.
-                    if (!plain.Succeeded && compareWithBaseline)
+                    if (testsPassed == false && compareWithBaseline)
                         testComparison = await CompareWithBaselineAsync(
                             plain, baseCommit, branchName, buildTarget, projectPath, cancellationToken);
                 }
-                else
+                else if (testsPassed == true)
                 {
                     var testProjectDirectories = CsProjHelper.FindTestProjectFiles(projectPath)
                         .Select(p => Path.GetDirectoryName(p)!)
                         .ToList();
-                    coverage = CoberturaParser.Merge(
-                        Directory.GetFiles(run.ResultsDirectory, "coverage.cobertura.xml", SearchOption.AllDirectories),
-                        projectPath, testProjectDirectories);
+                    coverage = CoberturaParser.Merge(CoverageFiles(run), projectPath, testProjectDirectories);
                 }
             }
             finally
@@ -452,6 +450,23 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         return name;
     }
 
+    /// <summary>
+    /// How one `dotnet test` run turned out: true when it ran tests and they passed, false when it failed,
+    /// and null when it succeeded but ran no test at all — a test project switched off in the solution's
+    /// build, or one that contains no tests — which says nothing about the migration. "Ran a test" means
+    /// the TRX files hold a per-test result: the TRX logger writes one for every test that ran, passes included.
+    /// </summary>
+    private static bool? Outcome(TestRun run) => !run.Succeeded ? false : run.AnyResults ? true : (bool?)null;
+
+    /// <summary>
+    /// The coverage reports a run left behind. The results directory only exists once something wrote into
+    /// it: a run that executed nothing never creates it, and enumerating a missing directory throws.
+    /// </summary>
+    private static string[] CoverageFiles(TestRun run) =>
+        Directory.Exists(run.ResultsDirectory)
+            ? Directory.GetFiles(run.ResultsDirectory, "coverage.cobertura.xml", SearchOption.AllDirectories)
+            : [];
+
     /// <summary>One `dotnet test` run: pass/fail, per-test failures, and where its result files are.</summary>
     private sealed class TestRun(bool succeeded, bool anyResults, IReadOnlySet<string> failed, string resultsDirectory) : IDisposable
     {
@@ -460,9 +475,12 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         public IReadOnlySet<string> Failed { get; } = failed;
         public string ResultsDirectory { get; } = resultsDirectory;
 
-        public void Dispose()
+        public void Dispose() => DeleteQuietly(ResultsDirectory);
+
+        /// <summary>Best effort: a leftover temp folder must never fail a run.</summary>
+        public static void DeleteQuietly(string directory)
         {
-            try { Directory.Delete(ResultsDirectory, recursive: true); } catch (IOException) { /* best effort */ }
+            try { Directory.Delete(directory, recursive: true); } catch (IOException) { /* best effort */ }
             catch (UnauthorizedAccessException) { /* best effort */ }
         }
     }
@@ -480,13 +498,23 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         if (collectCoverage)
             args.Add("--collect:XPlat Code Coverage");
 
-        var result = await ProcessRunner.RunAsync("dotnet", args, projectPath, cancellationToken);
+        try
+        {
+            var result = await ProcessRunner.RunAsync("dotnet", args, projectPath, cancellationToken);
 
-        var trxFiles = Directory.Exists(resultsDirectory)
-            ? Directory.GetFiles(resultsDirectory, "*.trx", SearchOption.AllDirectories)
-            : [];
-        var (anyResults, failed) = TrxParser.Read(trxFiles);
-        return new TestRun(result.Succeeded, anyResults, failed, resultsDirectory);
+            var trxFiles = Directory.Exists(resultsDirectory)
+                ? Directory.GetFiles(resultsDirectory, "*.trx", SearchOption.AllDirectories)
+                : [];
+            var (anyResults, failed) = TrxParser.Read(trxFiles);
+            return new TestRun(result.Succeeded, anyResults, failed, resultsDirectory);
+        }
+        catch
+        {
+            // A timed-out or cancelled run never returns a TestRun, so nothing else would delete
+            // whatever the TRX logger had already written there.
+            TestRun.DeleteQuietly(resultsDirectory);
+            throw;
+        }
     }
 
     /// <summary>

@@ -6,6 +6,11 @@ namespace Eolup.Core.Models;
 /// separate so the scoring rules stay a pure function, independent of any
 /// provider's implementation details.
 /// </summary>
+/// <param name="TestsPassed">
+/// True when tests ran and passed, false when the test run failed, null when no test ran: there is no test
+/// project, the build failed, or the test command succeeded but executed nothing (a test project switched
+/// off in the solution's build, or one that contains no tests).
+/// </param>
 /// <param name="FrameworkAlignedPackages">
 /// Packages still on the old framework's major version ("Id Version (file)"), reported only
 /// when the build or tests failed — a likely cause, never a verdict on its own.

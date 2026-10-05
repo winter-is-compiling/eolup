@@ -150,6 +150,42 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task TestProjectSwitchedOffInTheSolutionBuild_IsBlocked_NotACrash()
+    {
+        // Found by validating v0.3.0 on netch: the test project is in the solution but its build is switched
+        // off, so `dotnet test <solution>` exits 0, runs nothing and never creates its results directory.
+        // Remediate crashed with a DirectoryNotFoundException, and merely guarding that would have produced a
+        // HighConfidence verdict ("line coverage was not measured") for a migration no test ever ran against.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-tests-excluded-from-build");
+        var path = fixture.Path;
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.True(result.BuildSucceeded);
+        Assert.True(result.TestProjectExists);
+        Assert.Null(result.TestsPassed);
+        Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
+    }
+
+    [Fact]
+    public async Task TestProjectWithNoTests_IsBlocked_BecauseNothingRan()
+    {
+        // `dotnet test` on a test project that contains no test exits 0 ("No test is available") and writes an
+        // empty results file. Nothing vouches for the migration, so it can't be better than Blocked, and the
+        // reason must say that no test ran, not that tests "passed".
+        using var fixture = FixtureHarness.CopyToTemp("fixture-test-project-without-tests");
+        var path = fixture.Path;
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.True(result.BuildSucceeded);
+        Assert.Null(result.TestsPassed);
+        Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
+    }
+
+    [Fact]
     public async Task TestProjectWithoutACoverageCollector_StaysHighConfidence_ButSaysCoverageWasNotMeasured()
     {
         // Plenty of real repos don't reference coverlet.collector. Coverage can't
