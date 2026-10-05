@@ -2,20 +2,20 @@
 
 ## Why this needs more rigor than a typical CLI tool
 
-Rollforward's entire value proposition rests on one claim: *"you can trust this confidence score."* If that claim is wrong even occasionally, the product is worse than useless — it either causes a bad merge or trains people to ignore its verdicts entirely. Testing here isn't about coverage percentage; it's about proving the confidence verdict is correct and stays correct as the tool evolves.
+Eolup's entire value proposition rests on one claim: *"you can trust this confidence score."* If that claim is wrong even occasionally, the product is worse than useless — it either causes a bad merge or trains people to ignore its verdicts entirely. Testing here isn't about coverage percentage; it's about proving the confidence verdict is correct and stays correct as the tool evolves.
 
 ## The four layers
 
 ### 1. Unit tests — pure logic, no external dependencies
 
 Cover everything that doesn't touch a filesystem, a network call, or a subprocess:
-- `.rollforward.yml` parsing (explicit version / `next-major` / `next-lts`, missing file, malformed file)
+- `.eolup.yml` parsing (explicit version / `next-major` / `next-lts`, missing file, malformed file)
 - EOL-date comparison logic (given a version and an EOL date, is this urgent / approaching / fine?)
 - Confidence-rule evaluation, given a *simulated* build/test/API-usage result as input (this is the core decision table — test every branch of high / needs-review / blocked explicitly)
 
 These should be fast enough to run on every commit, no exceptions.
 
-**Provider tests** (`Rollforward.Providers.DotNet.Tests`) sit between this layer and the fixture suite: they exercise `CsProjHelper` — the .NET-specific file logic — against throwaway temp directories, so they *do* touch the filesystem (and three spawn real MSBuild to evaluate a property), but they're still fast (~2s) and need no network. They pin the behaviors real repos taught us the hard way: every branch of build-target resolution, traversal-project exclusion, that rewriting a project changes exactly one line (BOM and line endings preserved), and that a TFM declared only in a shared `Directory.Build.props` is found and rewritten there.
+**Provider tests** (`Eolup.Providers.DotNet.Tests`) sit between this layer and the fixture suite: they exercise `CsProjHelper` — the .NET-specific file logic — against throwaway temp directories, so they *do* touch the filesystem (and three spawn real MSBuild to evaluate a property), but they're still fast (~2s) and need no network. They pin the behaviors real repos taught us the hard way: every branch of build-target resolution, traversal-project exclusion, that rewriting a project changes exactly one line (BOM and line endings preserved), and that a TFM declared only in a shared `Directory.Build.props` is found and rewritten there.
 
 ### 2. Fixture-based integration/system tests — automated, not manual
 
@@ -26,7 +26,7 @@ The fixture repos are not manual test cases — they are the automated test suit
 | `fixture-trivial` | No breaking changes, full test coverage | High confidence — migration committed on its branch, PR opened |
 | `fixture-needs-review` | An obsolete-API call that's genuinely new after the version bump (TFM-conditional file inclusion — absent at net8.0, present at net10.0), in a file the tests never execute | Needs review — names both the obsolete call and the uncovered file |
 | `fixture-preexisting-warning` | A package-compatibility warning (`NU1701`) that's identical before and after the bump | High confidence — proves baseline-diffing correctly ignores pre-existing noise (see MANUAL_TEST_PASS.md, Pass #1 finding 3) |
-| `fixture-multi-root-projects` | One real `.sln` plus one unrelated project file at the root (mirrors eShopOnWeb's `.sln` + `docker-compose.dcproj`) | High confidence — proves automatic build-target resolution avoids the MSB1011 ambiguity without needing a `.rollforward.yml` override (see MANUAL_TEST_PASS.md, Pass #1 finding 2) |
+| `fixture-multi-root-projects` | One real `.sln` plus one unrelated project file at the root (mirrors eShopOnWeb's `.sln` + `docker-compose.dcproj`) | High confidence — proves automatic build-target resolution avoids the MSB1011 ambiguity without needing a `.eolup.yml` override (see MANUAL_TEST_PASS.md, Pass #1 finding 2) |
 | `fixture-version-mismatch` | Two services under one directory, on different TFMs (net8.0 / net10.0) | The oldest (net8.0) is "current": only `ServiceA` is bumped (asserted from the migration commit's file list), `ServiceB` is left alone, and `scan` notes it. Began as an error test (a monorepo path must never silently report one service's version — MANUAL_TEST_PASS.md Pass #2 finding 5); real repos mix versions (Pass #5), so the rule became oldest-first, one hop per run |
 | `fixture-no-tests` | No test project at all | Blocked — "cannot safely verify," no PR |
 | `fixture-zero-coverage` | A test project that builds and passes but never calls into the application code | Blocked — the tests execute none of the migrated code |
@@ -40,7 +40,7 @@ The fixture repos are not manual test cases — they are the automated test suit
 | `fixture-stale-framework-package` | A net8.0 app referencing `Microsoft.Extensions.Options` 8.0.0, with a test that fails on net10.0 | NeedsReview naming the broken test, plus a reason naming the package that is still on the old framework major; with the package bump on, the retry can't fix it, so the speculative commit is dropped and the verdict says it was tried |
 | `fixture-stale-package-fixed-by-bump` | A net8.0 minimal API whose in-memory test host comes from `Microsoft.AspNetCore.Mvc.Testing` 8.0.11 | After the bump to net10.0 the test fails with HTTP 500 (NeedsReview, package named). With the package bump on, `Mvc.Testing` moves to 10.x in its own commit, the retry passes, and the verdict is HighConfidence listing that package |
 
-A small test harness runs `rollforward scan` then `rollforward remediate` against each fixture and asserts the actual verdict matches the table above. This suite is what protects you from silently regressing trust in the tool as the confidence logic evolves — a change that flips `fixture-needs-review` to "high confidence" should fail CI immediately, not get discovered by chance later.
+A small test harness runs `eolup scan` then `eolup remediate` against each fixture and asserts the actual verdict matches the table above. This suite is what protects you from silently regressing trust in the tool as the confidence logic evolves — a change that flips `fixture-needs-review` to "high confidence" should fail CI immediately, not get discovered by chance later.
 
 The suite runs against a **recorded snapshot** of endoflife.date (`RecordedEolClient`), so a verdict can only change because this repo's code changed — not because the service was down or a new .NET release shifted what `next-lts` means. The real `dotnet`, `git` and MSBuild still run. One test (`LiveEndOfLifeDateSmokeTests`, trait `Category=Live`) still hits the real API to catch its response shape drifting; it is excluded from the merge-gating CI (which runs `--filter "Category!=Live"`) and runs instead in a weekly `live-smoke.yml` workflow, so a third-party outage can't turn a merge red. Skip it offline with the same filter.
 
@@ -58,9 +58,9 @@ This is where a human tester's judgment matters most, and it should be spent loo
 
 ### 4. Reference-repo corpus — the formalized, repeatable version of layer 3
 
-Manual testing is where a new real-world repo earns its place; the [reference-repos](reference-repos/README.md) corpus is where it stays checked once it has. Each entry is a real public repo pinned to a specific commit, with a documented expected outcome — `scripts/test-against-reference-repos.sh` clones each one fresh and prints what Rollforward actually does with it today, for a human to diff against what's documented.
+Manual testing is where a new real-world repo earns its place; the [reference-repos](reference-repos/README.md) corpus is where it stays checked once it has. Each entry is a real public repo pinned to a specific commit, with a documented expected outcome — `scripts/test-against-reference-repos.sh` clones each one fresh and prints what Eolup actually does with it today, for a human to diff against what's documented.
 
-This is deliberately **not** folded into the automated fixture suite: it's slower (real clones, real `dotnet build`/`test` against much larger real codebases), more network-dependent, and — critically — it has no fixed pass/fail assertion, because the point is surfacing real-world surprises, not enforcing a verdict on code Rollforward doesn't own. Run it periodically (after a change to core detection/scoring logic, or whenever adding a new reference repo), not on every commit.
+This is deliberately **not** folded into the automated fixture suite: it's slower (real clones, real `dotnet build`/`test` against much larger real codebases), more network-dependent, and — critically — it has no fixed pass/fail assertion, because the point is surfacing real-world surprises, not enforcing a verdict on code Eolup doesn't own. Run it periodically (after a change to core detection/scoring logic, or whenever adding a new reference repo), not on every commit.
 
 This already caught a real bug once: the very first version of the explicit-build-target fix passed all fixture tests, but running it against eShopOnWeb's actual unmodified state (not the manually-tweaked clone used during the original manual pass) revealed the ambiguity error-detection check only recognized one of the two error codes `dotnet build` can emit for the same underlying problem (`MSB1011` vs `MSB1050`, depending on how the directory is passed) — see MANUAL_TEST_PASS.md, Pass #1 finding 2.
 

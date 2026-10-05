@@ -24,4 +24,4 @@ jobs:
             10.0.x
 
       - name: Run the live test
-        run: dotnet test tests/Rollforward.Fixtures.Tests --configuration Release --filter "Category=Live"
+        run: dotnet test tests/Eolup.Fixtures.Tests --configuration Release --filter "Category=Live"

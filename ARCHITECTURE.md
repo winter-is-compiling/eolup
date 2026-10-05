@@ -2,14 +2,14 @@
 
 ## Overview
 
-Rollforward splits cleanly along a trust boundary: anything that touches your source code runs inside your own infrastructure; anything hosted by us only ever sees metadata.
+Eolup splits cleanly along a trust boundary: anything that touches your source code runs inside your own infrastructure; anything hosted by us only ever sees metadata.
 
 ```
 ┌─────────────────────────────────────────┐        ┌───────────────────────────────────┐
 │  CUSTOMER'S OWN CI/CD, ANY PLATFORM       │        │  HOSTED PORTAL (metadata only)     │
 │  (source code never leaves here)          │        │                                     │
 │                                            │        │                                     │
-│  rollforward-cli                           │        │  API + DB                          │
+│  eolup-cli                           │        │  API + DB                          │
 │   ├─ scan      (every build, read-only)   │──────► │   - service inventory              │
 │   ├─ remediate (on-demand)                │  JSON  │   - confidence scores              │
 │   └─ language providers (.NET first)      │  only  │   - EOL countdown                  │
@@ -26,8 +26,8 @@ Rollforward splits cleanly along a trust boundary: anything that touches your so
 
 ## Repository split (open-core)
 
-- **`rollforward-cli`** (this repo, open source, Apache 2.0) — the scanning and remediation engine, the language provider interface, and the CI adapters. Anyone can run this standalone with no account, no signup, and no data ever leaving their machine.
-- **`rollforward-portal`** (private) — the hosted dashboard, multi-tenant API, notifications, billing, and compliance report generation. This is the commercial layer built on top of the open engine.
+- **`eolup-cli`** (this repo, open source, Apache 2.0) — the scanning and remediation engine, the language provider interface, and the CI adapters. Anyone can run this standalone with no account, no signup, and no data ever leaving their machine.
+- **`eolup-portal`** (private) — the hosted dashboard, multi-tenant API, notifications, billing, and compliance report generation. This is the commercial layer built on top of the open engine.
 
 ## Why a CLI-first design, not a CI-native tool
 
@@ -36,7 +36,7 @@ Sonar and Dependency-Track both follow this pattern for a reason: writing the re
 ## The two-pipeline model
 
 1. **Scan pipeline** — runs on every normal build. Detects the current version, checks it against the EOL calendar, reports status. Cheap, read-only, non-blocking by default.
-2. **Remediation pipeline** — runs only on demand (triggered from the portal or via `rollforward remediate` directly). Pulls the repo into an isolated branch, runs the transformation, runs the project's own existing test suite in a sandboxed container, computes a confidence score, and opens a PR (or doesn't, depending on the verdict).
+2. **Remediation pipeline** — runs only on demand (triggered from the portal or via `eolup remediate` directly). Pulls the repo into an isolated branch, runs the transformation, runs the project's own existing test suite in a sandboxed container, computes a confidence score, and opens a PR (or doesn't, depending on the verdict).
 
 Keeping these separate means the expensive work (actually running a transformation + full test suite) only happens when someone has decided they want the fix — not on every commit.
 
@@ -75,7 +75,7 @@ Two axes are tracked independently:
 - **Target** — where the team actually wants to land. This is never assumed to be "latest." It's explicit, per-repo configuration:
 
 ```yaml
-# .rollforward.yml
+# .eolup.yml
 target: "19"        # an explicit version, or:
 # target: next-major
 # target: next-lts  # meaningful where the ecosystem has an LTS/STS split (e.g. .NET)
@@ -84,16 +84,16 @@ target: "19"        # an explicit version, or:
                         # resolution can't disambiguate (see below)
 ```
 
-Org-level defaults live in the portal; a repo's own `.rollforward.yml` overrides them.
+Org-level defaults live in the portal; a repo's own `.eolup.yml` overrides them.
 
 ## Build-target resolution (.NET)
 
 Plain `dotnet build <directory>` fails with `MSB1011` whenever a repo's root has more than one project/solution file — a real, fairly common pattern (found via the eShopOnWeb manual test pass, which keeps a main `.sln` alongside an unrelated `docker-compose.dcproj`). Rather than handing `dotnet build` a bare directory, `CsProjHelper.ResolveBuildTarget` resolves an explicit target itself:
 
-1. If `.rollforward.yml` sets `solution:`, use that — always wins.
-2. Else, if exactly one `.sln`/`.slnx` exists at the root, use it. This alone fixes the common case above, since Rollforward is no longer asking `dotnet build` to auto-discover among *every* project-like file itself — just the one solution that actually matters.
+1. If `.eolup.yml` sets `solution:`, use that — always wins.
+2. Else, if exactly one `.sln`/`.slnx` exists at the root, use it. This alone fixes the common case above, since Eolup is no longer asking `dotnet build` to auto-discover among *every* project-like file itself — just the one solution that actually matters.
 3. Else, if exactly one `.csproj` exists at the root (no solution file at all), use that.
-4. Else, if there is nothing buildable at the root at all and exactly one `.sln`/`.slnx` exists in a subfolder (`src/App.sln` is a common layout), use it. With several nested solutions (found via adnc, which has six), `dotnet build` reports `MSB1003`; Rollforward turns that into a message listing the solutions it found and pointing at `solution:`, which accepts a path relative to the repo.
+4. Else, if there is nothing buildable at the root at all and exactly one `.sln`/`.slnx` exists in a subfolder (`src/App.sln` is a common layout), use it. With several nested solutions (found via adnc, which has six), `dotnet build` reports `MSB1003`; Eolup turns that into a message listing the solutions it found and pointing at `solution:`, which accepts a path relative to the repo.
 5. Otherwise — genuinely multiple competing solutions — fall back to the bare directory, so the existing `MSB1011` error still fires with a message pointing at the `solution:` config fix, rather than silently guessing which one is "the right one."
 
 ## Upgrades happen one hop per run
@@ -108,12 +108,12 @@ Run 3: net8.0 -> net10.0  (PR 3)
 
 The reasoning: breaking changes are met one hop at a time, so each PR is small, more likely to build and pass cleanly (a real chance at a high-confidence verdict), and when a hop *does* need review it is obvious which one. `scan` shows the whole journey (`Upgrade path: net6.0 -> net8.0 -> net10.0`) so it is clear where the steps end; `Target:` is only this run's hop. Ecosystems whose tooling only supports single-major hops (Angular's `ng update`) fit this model naturally.
 
-**Mixed versions in one repo.** Real repos routinely have projects on different versions. Rollforward treats the **oldest** as the repo's current version and moves only the projects on it this run; the rest are already ahead and wait, so the repo converges instead of some projects leaping several majors. Projects targeting `netstandard*` are never touched and never count: it is a compatibility label that runs on every modern .NET, not an outdated runtime, and retargeting it would stop older consumers referencing the library. .NET Framework projects (`net461`, `net35`) are left alone the same way, with a note: moving .NET Framework to modern .NET is a different migration, and real library repos keep such projects on purpose (Dapper.EntityFramework, CliWrap.Signaler). Only a target framework Rollforward doesn't recognise makes it refuse rather than guess.
+**Mixed versions in one repo.** Real repos routinely have projects on different versions. Eolup treats the **oldest** as the repo's current version and moves only the projects on it this run; the rest are already ahead and wait, so the repo converges instead of some projects leaping several majors. Projects targeting `netstandard*` are never touched and never count: it is a compatibility label that runs on every modern .NET, not an outdated runtime, and retargeting it would stop older consumers referencing the library. .NET Framework projects (`net461`, `net35`) are left alone the same way, with a note: moving .NET Framework to modern .NET is a different migration, and real library repos keep such projects on purpose (Dapper.EntityFramework, CliWrap.Signaler). Only a target framework Eolup doesn't recognise makes it refuse rather than guess.
 
-**Multi-targeted projects (`<TargetFrameworks>`).** The same rules apply entry by entry. A project's version is its oldest modern .NET entry; a run moves only the entries on the repo's current version, one hop, keeping platform suffixes (`net8.0-android` → `net10.0-android`); `netstandard*` and .NET Framework entries (`net461`, `net48`) are never touched, since a library listing them is deliberately serving older consumers. The end-of-life entry is **replaced, not kept alongside**: `net6.0;net8.0;netstandard2.0` → `net8.0;netstandard2.0`. Every `<TargetFrameworks>` element in the declaring file is rewritten, conditional ones included (MAUI-style `$(TargetFrameworks);net8.0-windows…` appends), with property references passed through untouched. If the list is assembled from a property Rollforward doesn't follow (`<TargetFrameworks>$(LibraryTargets)</TargetFrameworks>`), it stops before changing anything and says so. For a published library, dropping a target framework is a consumer-visible change: it shows as a one-line diff in the PR, and the reviewer should treat it as such.
+**Multi-targeted projects (`<TargetFrameworks>`).** The same rules apply entry by entry. A project's version is its oldest modern .NET entry; a run moves only the entries on the repo's current version, one hop, keeping platform suffixes (`net8.0-android` → `net10.0-android`); `netstandard*` and .NET Framework entries (`net461`, `net48`) are never touched, since a library listing them is deliberately serving older consumers. The end-of-life entry is **replaced, not kept alongside**: `net6.0;net8.0;netstandard2.0` → `net8.0;netstandard2.0`. Every `<TargetFrameworks>` element in the declaring file is rewritten, conditional ones included (MAUI-style `$(TargetFrameworks);net8.0-windows…` appends), with property references passed through untouched. If the list is assembled from a property Eolup doesn't follow (`<TargetFrameworks>$(LibraryTargets)</TargetFrameworks>`), it stops before changing anything and says so. For a published library, dropping a target framework is a consumer-visible change: it shows as a one-line diff in the PR, and the reviewer should treat it as such.
 
-**Automatic chaining (opt-in)** — `chain: true` in `.rollforward.yml`, `--chain` on the CLI, or `chain: 'true'` on the GitHub Action. The run carries on to the next hop while each hop is **HighConfidence**, re-scanning in between so each hop starts from what the previous one produced, and stops at the first hop that isn't — it never builds further on a hop that needs a human. Every hop is its own commit on a branch stacked on the previous hop's, so the PR is opened for the **last HighConfidence hop** and contains exactly those steps, one commit each; the hop that stopped the run is left as a local branch for inspection and described in the PR body. `--fail-on` judges that last attempted hop. Off by default: one hop per run stays the agreed baseline.
+**Automatic chaining (opt-in)** — `chain: true` in `.eolup.yml`, `--chain` on the CLI, or `chain: 'true'` on the GitHub Action. The run carries on to the next hop while each hop is **HighConfidence**, re-scanning in between so each hop starts from what the previous one produced, and stops at the first hop that isn't — it never builds further on a hop that needs a human. Every hop is its own commit on a branch stacked on the previous hop's, so the PR is opened for the **last HighConfidence hop** and contains exactly those steps, one commit each; the hop that stopped the run is left as a local branch for inspection and described in the PR body. `--fail-on` judges that last attempted hop. Off by default: one hop per run stays the agreed baseline.
 
 ## External data dependency
 
-Rollforward does not maintain its own database of framework versions or EOL dates. It queries [endoflife.date](https://endoflife.date)'s API at scan time, which already covers .NET, Angular, Java, Python, Node, and 200+ other products. This is a deliberate choice to avoid an unbounded, ever-growing maintenance burden that has nothing to do with Rollforward's actual value.
+Eolup does not maintain its own database of framework versions or EOL dates. It queries [endoflife.date](https://endoflife.date)'s API at scan time, which already covers .NET, Angular, Java, Python, Node, and 200+ other products. This is a deliberate choice to avoid an unbounded, ever-growing maintenance burden that has nothing to do with Eolup's actual value.

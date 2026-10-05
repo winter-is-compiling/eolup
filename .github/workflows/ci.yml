@@ -28,7 +28,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          # 10.0.x for Rollforward's own projects; 8.0.x because every fixture is
+          # 10.0.x for Eolup's own projects; 8.0.x because every fixture is
           # pinned to net8.0 as its starting state before remediation bumps it.
           dotnet-version: |
             8.0.x

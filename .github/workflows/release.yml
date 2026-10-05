@@ -1,12 +1,12 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds a self-contained, single-file `rollforward` for
+# Pushing a tag like v0.3.0 builds a self-contained, single-file `eolup` for
 # each platform, smoke-tests the native ones, and publishes them as assets of the
 # GitHub release for that tag, with a SHA256SUMS file. The release notes come from
 # that version's section of CHANGELOG.md.
 #
 # The Action (action.yml) downloads these assets when a workflow pins it to a
-# release tag, instead of building Rollforward from source on every run.
+# release tag, instead of building Eolup from source on every run.
 
 on:
   push:
@@ -47,7 +47,7 @@ jobs:
       - name: Publish
         shell: bash
         run: |
-          dotnet publish src/Rollforward.Cli -c Release -r ${{ matrix.rid }} --self-contained \
+          dotnet publish src/Eolup.Cli -c Release -r ${{ matrix.rid }} --self-contained \
             -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=embedded \
             -p:Version="${GITHUB_REF_NAME#v}" -o publish
 
@@ -55,7 +55,7 @@ jobs:
         if: matrix.smoke
         shell: bash
         run: |
-          exe=publish/rollforward; [ -f publish/rollforward.exe ] && exe=publish/rollforward.exe
+          exe=publish/eolup; [ -f publish/eolup.exe ] && exe=publish/eolup.exe
           "$exe" --version | tee version.txt
           grep -q "^${GITHUB_REF_NAME#v}" version.txt   # the binary reports the tag's version
           "$exe" scan fixtures/fixture-trivial
@@ -66,14 +66,14 @@ jobs:
           mkdir dist
           cp LICENSE publish/
           if [ "${{ matrix.rid }}" = "win-x64" ]; then
-            (cd publish && 7z a -tzip ../dist/rollforward-${{ matrix.rid }}.zip rollforward.exe LICENSE > /dev/null)
+            (cd publish && 7z a -tzip ../dist/eolup-${{ matrix.rid }}.zip eolup.exe LICENSE > /dev/null)
           else
-            tar -czf dist/rollforward-${{ matrix.rid }}.tar.gz -C publish rollforward LICENSE
+            tar -czf dist/eolup-${{ matrix.rid }}.tar.gz -C publish eolup LICENSE
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rollforward-${{ matrix.rid }}
+          name: eolup-${{ matrix.rid }}
           path: dist/*
 
   release:
@@ -88,7 +88,7 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: cd dist && sha256sum rollforward-* > SHA256SUMS && cat SHA256SUMS
+        run: cd dist && sha256sum eolup-* > SHA256SUMS && cat SHA256SUMS
 
       - name: Release notes from CHANGELOG.md
         run: |
@@ -110,7 +110,7 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --title "Rollforward $GITHUB_REF_NAME" --notes-file notes.md
+            gh release create "$GITHUB_REF_NAME" dist/* --title "Eolup $GITHUB_REF_NAME" --notes-file notes.md
           fi
 
   # Proves the Action really downloads and runs the binary just published,

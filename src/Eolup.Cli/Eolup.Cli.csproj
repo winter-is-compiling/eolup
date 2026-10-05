@@ -1,0 +1,24 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Eolup.Core\Eolup.Core.csproj" />
+    <ProjectReference Include="..\Eolup.Providers.DotNet\Eolup.Providers.DotNet.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="3.0.0-rc.1.26425.128" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- The command users type; the project keeps its descriptive name. -->
+    <AssemblyName>eolup</AssemblyName>
+    <RootNamespace>Eolup.Cli</RootNamespace>
+    <!-- Release builds get the tag's version (-p:Version in release.yml); anything else is a dev build. -->
+    <Version>0.0.0-dev</Version>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

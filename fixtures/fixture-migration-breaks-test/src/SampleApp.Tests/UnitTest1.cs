@@ -9,7 +9,7 @@ public class GreeterTests
     }
 
     // Passes on net8.0 and fails once the project runs on net10.0: a stand-in for a
-    // genuine behavioural change between runtimes. This is the failure Rollforward
+    // genuine behavioural change between runtimes. This is the failure Eolup
     // must call a likely regression, by name.
     [Fact]
     public void Runtime_IsDotNet8()

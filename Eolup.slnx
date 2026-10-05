@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Eolup.Cli/Eolup.Cli.csproj" />
+    <Project Path="src/Eolup.Core/Eolup.Core.csproj" />
+    <Project Path="src/Eolup.Providers.DotNet/Eolup.Providers.DotNet.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Eolup.Core.Tests/Eolup.Core.Tests.csproj" />
+    <Project Path="tests/Eolup.Fixtures.Tests/Eolup.Fixtures.Tests.csproj" />
+    <Project Path="tests/Eolup.Providers.DotNet.Tests/Eolup.Providers.DotNet.Tests.csproj" />
+  </Folder>
+</Solution>
