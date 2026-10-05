@@ -27,6 +27,8 @@ It scans a .NET project for outdated, end-of-life framework versions, tells you 
     fail-on: needs-review  # remediate only: none (default) | blocked | needs-review
     chain: true            # remediate only: keep going hop by hop while each is HighConfidence (default: false)
     bump-packages: true    # remediate only: retry with framework-tied packages moved to the new major if the bump alone fails (default: false)
+    build-timeout: 45      # remediate only: minutes a restore/build may run before Eolup stops it (default: 30)
+    test-timeout: 120      # remediate only: minutes the test run may take; past it the verdict is Blocked (default: 60)
 ```
 
 See [action.yml](action.yml) — it's a thin composite action. Pinned to a release tag it downloads that release's pre-built binary (checksum-verified); pinned to a branch or commit it builds the CLI from source. It's dogfooded against this repo's own fixtures in [`.github/workflows/self-test-action.yml`](.github/workflows/self-test-action.yml).
@@ -35,11 +37,11 @@ See [action.yml](action.yml) — it's a thin composite action. Pinned to a relea
 
 ```bash
 eolup scan <path>
-eolup remediate <path> [--fail-on none|blocked|needs-review] [--chain] [--bump-packages]
+eolup remediate <path> [--fail-on none|blocked|needs-review] [--chain] [--bump-packages] [--build-timeout <minutes>] [--test-timeout <minutes>]
 
 # from source:
 dotnet run --project src/Eolup.Cli -- scan <path>
-dotnet run --project src/Eolup.Cli -- remediate <path> [--fail-on none|blocked|needs-review] [--chain] [--bump-packages]
+dotnet run --project src/Eolup.Cli -- remediate <path> [--fail-on none|blocked|needs-review] [--chain] [--bump-packages] [--build-timeout <minutes>] [--test-timeout <minutes>]
 ```
 
 Exit codes: `0` success, `1` an error Eolup could explain (bad path, project doesn't build, ...), `2` the verdict tripped `--fail-on`. By default a verdict never fails the run — whether "needs review" or "blocked" should turn your pipeline red is your policy, not ours.
@@ -118,7 +120,16 @@ minCoverage: 50        # optional — line-coverage percentage of the migrated c
 bumpPackages: true     # optional — if the framework bump alone breaks the build or tests, move the
                         # packages that version with the framework (ASP.NET Core, EF Core,
                         # Microsoft.Extensions.*) to the target major and re-run; default: off
+
+buildTimeoutMinutes: 30  # optional — how long a restore/build may run before Eolup stops it (default 30)
+testTimeoutMinutes: 60   # optional — how long the test run may take before Eolup stops it (default 60)
 ```
+
+### Time limits
+
+Eolup runs your repo's own restore, build and tests, and a large solution or a slow suite can legitimately take tens of minutes, more on a busy CI runner. Each step has its own limit: `buildTimeoutMinutes` (default 30) for the restore and builds, `testTimeoutMinutes` (default 60) for the test run. Set them in `.eolup.yml`, or per run with `--build-timeout` / `--test-timeout` (the Action's `build-timeout` / `test-timeout` inputs); the flag wins over the file.
+
+A step that runs past its limit is killed with everything it started, and the run says so instead of guessing: a build that was stopped before any change was made is an error (`Nothing was changed`), and a build or test run that was stopped after the migration makes the verdict **Blocked** — "the test run did not finish within 60 minutes", with the setting that gives it more time. A run that was stopped says nothing about the change, so it is never reported as passed or failed. (Quick commands such as `git` and MSBuild property evaluation have a fixed 5-minute limit.)
 
 ### Package bump (opt-in)
 

@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### New
+
+- **Time limits you can set.** `buildTimeoutMinutes` (restore and builds, default 30) and `testTimeoutMinutes` (the test run, default 60) in `.eolup.yml`, `--build-timeout` / `--test-timeout` on the CLI, and `build-timeout` / `test-timeout` on the Action. See the README's "Time limits". (#12)
+
 ### Fixed
+
+- **A slow but healthy build or test run is no longer killed after 5 minutes.** Every child process had one fixed 5-minute limit, so a large restore, a long test suite or a busy CI runner ended in `Error: 'dotnet' did not complete within 5 minutes ... a lingering background process`: exit code 1, no verdict, and a leaked temp folder (seen on 6 of 13 real repositories). The limits are now longer and configurable (above). A step that is still stopped says which command, which limit and which setting raises it, and after the migration the verdict is `Blocked` ("the test run did not finish within 60 minutes") instead of an error. (#12)
 
 - **A one-entry `<TargetFrameworks>` list no longer crashes `remediate`.** A project that spells its framework in the plural element with a single entry (`<TargetFrameworks>net8.0</TargetFrameworks>`, as every project in Prowlarr does) crashed with a raw `InvalidOperationException` after the preflight build and after the branch was created, in repos with several projects after some files had already been rewritten. It is now migrated like any other project and keeps its plural form (a one-line diff). A framework that can't be rewritten at all (set through an import, or built from a property) now stops the run before the preflight build, any branch or any edit, and names the project. (#9)
 - **A test run that executes nothing is `Blocked`, not a crash or a pass.** When `dotnet test` succeeded without running a test (a test project switched off in the solution's build, or one that contains no tests), `remediate` crashed with a `DirectoryNotFoundException` or, for an empty test project, blamed "zero coverage". The verdict is now `Blocked` with "the test command succeeded but ran no tests". A timed-out or cancelled test run also no longer leaves its results folder in the temp directory. (#11)

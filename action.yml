@@ -39,6 +39,19 @@ inputs:
       Ignored by `scan`.
     required: false
     default: 'false'
+  build-timeout:
+    description: >
+      Minutes a restore or build may run before Eolup stops it. A build that is stopped
+      can't be verified. Default: `buildTimeoutMinutes` from .eolup.yml, else 30.
+      Ignored by `scan`.
+    required: false
+    default: ''
+  test-timeout:
+    description: >
+      Minutes the test run may take before Eolup stops it; the verdict is then Blocked.
+      Default: `testTimeoutMinutes` from .eolup.yml, else 60. Ignored by `scan`.
+    required: false
+    default: ''
   version:
     description: >
       Which release's pre-built `eolup` binary to use, e.g. 'v0.3.0' or
@@ -129,6 +142,8 @@ runs:
         EOLUP_FAIL_ON: ${{ inputs.fail-on }}
         EOLUP_CHAIN: ${{ inputs.chain }}
         EOLUP_BUMP_PACKAGES: ${{ inputs.bump-packages }}
+        EOLUP_BUILD_TIMEOUT: ${{ inputs.build-timeout }}
+        EOLUP_TEST_TIMEOUT: ${{ inputs.test-timeout }}
         EOLUP_CLI: ${{ steps.cli.outputs.path }}
       run: |
         TARGET_PATH="$EOLUP_PATH"
@@ -143,6 +158,13 @@ runs:
           fi
           if [ "$EOLUP_BUMP_PACKAGES" = "true" ]; then
             EXTRA_ARGS+=(--bump-packages)
+          fi
+          # Passed as separate arguments (never spliced into a command line); the CLI rejects a non-number.
+          if [ -n "$EOLUP_BUILD_TIMEOUT" ]; then
+            EXTRA_ARGS+=(--build-timeout "$EOLUP_BUILD_TIMEOUT")
+          fi
+          if [ -n "$EOLUP_TEST_TIMEOUT" ]; then
+            EXTRA_ARGS+=(--test-timeout "$EOLUP_TEST_TIMEOUT")
           fi
         fi
         # github.action_path resolves to this repo checked out at whatever ref

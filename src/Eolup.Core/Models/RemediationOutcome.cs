@@ -11,6 +11,10 @@ namespace Eolup.Core.Models;
 /// project, the build failed, or the test command succeeded but executed nothing (a test project switched
 /// off in the solution's build, or one that contains no tests).
 /// </param>
+/// <param name="Unverifiable">
+/// Why the migration could not be verified at all, in the provider's own words: a build or test run was
+/// stopped for taking too long, so no answer exists. Null when every step finished. It makes the verdict Blocked.
+/// </param>
 /// <param name="FrameworkAlignedPackages">
 /// Packages still on the old framework's major version ("Id Version (file)"), reported only
 /// when the build or tests failed — a likely cause, never a verdict on its own.
@@ -32,5 +36,6 @@ public sealed record RemediationOutcome(
     TestComparison? TestComparison = null,
     IReadOnlyList<string>? FrameworkAlignedPackages = null,
     IReadOnlyList<string>? PackagesBumped = null,
-    IReadOnlyList<string>? UnhelpfulPackageBumps = null
+    IReadOnlyList<string>? UnhelpfulPackageBumps = null,
+    string? Unverifiable = null
 );

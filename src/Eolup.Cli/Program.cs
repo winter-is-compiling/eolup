@@ -49,12 +49,26 @@ var bumpPackagesOption = new Option<bool>("--bump-packages")
                   "that makes the migration pass. Same as `bumpPackages: true` in .eolup.yml. Default: off.",
 };
 
+var buildTimeoutOption = new Option<int?>("--build-timeout")
+{
+    Description = "Minutes a restore or build may run before Eolup stops it. Same as `buildTimeoutMinutes` in .eolup.yml. " +
+                  "Default: 30. A build that is stopped can't be verified.",
+};
+
+var testTimeoutOption = new Option<int?>("--test-timeout")
+{
+    Description = "Minutes the test run may take before Eolup stops it (the verdict is then Blocked). " +
+                  "Same as `testTimeoutMinutes` in .eolup.yml. Default: 60.",
+};
+
 var remediateCommand = new Command("remediate", "Attempt to migrate the project and report a confidence verdict.")
 {
     pathArgument,
     failOnOption,
     chainOption,
-    bumpPackagesOption
+    bumpPackagesOption,
+    buildTimeoutOption,
+    testTimeoutOption
 };
 remediateCommand.SetAction(async (parseResult, cancellationToken) =>
 {
@@ -62,10 +76,14 @@ remediateCommand.SetAction(async (parseResult, cancellationToken) =>
     var failOn = parseResult.GetValue(failOnOption);
     var chainFlag = parseResult.GetValue(chainOption);
     var bumpPackages = parseResult.GetValue(bumpPackagesOption);
+    var buildTimeoutMinutes = parseResult.GetValue(buildTimeoutOption);
+    var testTimeoutMinutes = parseResult.GetValue(testTimeoutOption);
     return await RunSafelyAsync(async () =>
     {
         var chain = chainFlag || EolupConfigLoader.Load(path).Chain;
-        var run = await CreateEngine(bumpPackages).RemediateChainAsync(
+        var engine = CreateEngine(
+            bumpPackages, Minutes(buildTimeoutMinutes, "--build-timeout"), Minutes(testTimeoutMinutes, "--test-timeout"));
+        var run = await engine.RemediateChainAsync(
             path, chain ? EolupEngine.MaxChainHops : 1, cancellationToken);
         PrintRemediationRun(run);
 
@@ -110,8 +128,18 @@ var rootCommand = new RootCommand("Eolup — fleet-wide framework EOL scanning a
 
 return await rootCommand.Parse(args).InvokeAsync();
 
-static EolupEngine CreateEngine(bool bumpPackages = false) =>
-    new(new EndOfLifeDateClient(), new DotNetLanguageProvider(bumpPackages));
+static EolupEngine CreateEngine(bool bumpPackages = false, TimeSpan? buildTimeout = null, TimeSpan? testTimeout = null) =>
+    new(new EndOfLifeDateClient(), new DotNetLanguageProvider(
+        new DotNetProviderOptions { BumpPackages = bumpPackages, BuildTimeout = buildTimeout, TestTimeout = testTimeout }));
+
+// A timeout given on the command line, in minutes: unset means "use .eolup.yml, then the default".
+static TimeSpan? Minutes(int? minutes, string flag) =>
+    minutes switch
+    {
+        null => null,
+        < 1 => throw new EolupUserException($"{flag} must be at least 1 (a number of minutes), but it is {minutes}."),
+        int m => TimeSpan.FromMinutes(m),
+    };
 
 static async Task<int> RunSafelyAsync(Func<Task<int>> action)
 {

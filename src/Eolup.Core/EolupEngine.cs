@@ -93,6 +93,7 @@ public sealed class EolupEngine(IEolClient eolClient, ILanguageProvider provider
             outcome.TestComparison,
             outcome.FrameworkAlignedPackages,
             outcome.PackagesBumped,
-            outcome.UnhelpfulPackageBumps);
+            outcome.UnhelpfulPackageBumps,
+            outcome.Unverifiable);
     }
 }

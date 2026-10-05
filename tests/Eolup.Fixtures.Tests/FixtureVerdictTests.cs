@@ -19,6 +19,9 @@ public class FixtureVerdictTests
     private static EolupEngine CreateEngine(bool bumpPackages = false) =>
         new(new RecordedEolClient(), new DotNetLanguageProvider(bumpPackages));
 
+    private static EolupEngine CreateEngine(DotNetProviderOptions options) =>
+        new(new RecordedEolClient(), new DotNetLanguageProvider(options));
+
     [Fact]
     public async Task Trivial_YieldsHighConfidence()
     {
@@ -167,6 +170,30 @@ public class FixtureVerdictTests
         Assert.Null(result.TestsPassed);
         Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
     }
+
+    [Fact]
+    public async Task ATestRunThatDoesNotFinishInTime_IsBlocked_AndLeavesItsResultsFolderBehindNowhere()
+    {
+        // Found by validating v0.3.0 on StackExchange.Redis, RestSharp and actions/runner: a fixed 5-minute
+        // limit killed legitimate test runs, the run ended in a crash-style error with no verdict, and the
+        // temp results folder leaked. A run stopped for taking too long now says exactly that, with the
+        // setting that gives it more time. The limit is scaled down to seconds here; the test sleeps for 10 minutes.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-test-that-never-finishes");
+        var path = fixture.Path;
+        var foldersBefore = ResultsFolders();
+
+        var result = await CreateEngine(new DotNetProviderOptions { TestTimeout = TimeSpan.FromSeconds(45) }).RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.True(result.BuildSucceeded);
+        var reason = Assert.Single(result.Reasons);
+        Assert.Contains("test run did not finish within 45 seconds", reason);
+        Assert.Contains("'dotnet test'", reason);
+        Assert.Contains("testTimeoutMinutes", reason);
+        Assert.Empty(ResultsFolders().Except(foldersBefore));
+    }
+
+    private static List<string> ResultsFolders() => Directory.GetDirectories(Path.GetTempPath(), "eolup-tests-*").ToList();
 
     [Fact]
     public async Task TestProjectWithNoTests_IsBlocked_BecauseNothingRan()

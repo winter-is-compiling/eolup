@@ -20,10 +20,10 @@ namespace Eolup.Providers.DotNet;
 /// </summary>
 public sealed partial class DotNetLanguageProvider : ILanguageProvider
 {
-    private readonly bool _bumpPackages;
+    private readonly DotNetProviderOptions _options;
     private IPackageVersionSource? _versionSource;
 
-    public DotNetLanguageProvider() : this(bumpPackages: false)
+    public DotNetLanguageProvider() : this(new DotNetProviderOptions())
     {
     }
 
@@ -32,9 +32,13 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
     /// stale framework-aligned packages to the target major and re-run (`bumpPackages: true` in
     /// .eolup.yml does the same). Off by default.
     /// </param>
-    public DotNetLanguageProvider(bool bumpPackages)
+    public DotNetLanguageProvider(bool bumpPackages) : this(new DotNetProviderOptions { BumpPackages = bumpPackages })
     {
-        _bumpPackages = bumpPackages;
+    }
+
+    public DotNetLanguageProvider(DotNetProviderOptions options)
+    {
+        _options = options;
     }
 
     internal DotNetLanguageProvider(bool bumpPackages, IPackageVersionSource versionSource) : this(bumpPackages)
@@ -116,9 +120,15 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         return VersionPlanning.DetectCurrent(projectPath, nonTest, evaluation.UnresolvedCount);
     }
 
+    /// <summary>The longest a repo's own build, and its test run, may take: what the caller asked for, else the repo's config, else the default.</summary>
+    private sealed record Timeouts(TimeSpan Build, TimeSpan Test);
+
     public async Task<RemediationOutcome> RemediateAsync(string projectPath, string targetVersion, CancellationToken cancellationToken = default)
     {
         var config = EolupConfigLoader.Load(projectPath);
+        var timeouts = new Timeouts(
+            _options.BuildTimeout ?? TimeSpan.FromMinutes(config.BuildTimeoutMinutes),
+            _options.TestTimeout ?? TimeSpan.FromMinutes(config.TestTimeoutMinutes));
 
         // Decide what this run changes before touching anything (no branch, no
         // build): one hop, applied to the projects on the repo's current — that is,
@@ -167,7 +177,21 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         // Verify the project builds *before* touching anything — a pre-existing
         // build failure is a fundamentally different situation from one caused by
         // the migration itself, and should never be silently attempted against.
-        var preflightBuild = await ProcessRunner.RunAsync("dotnet", ["build", buildTarget], projectPath, cancellationToken);
+        ProcessResult preflightBuild;
+        try
+        {
+            preflightBuild = await ProcessRunner.RunAsync("dotnet", ["build", buildTarget], projectPath, timeouts.Build, cancellationToken);
+        }
+        catch (ProcessTimeoutException timeout)
+        {
+            // Nothing has been touched yet, so this is an error with a way forward, not a verdict.
+            throw new EolupUserException(
+                $"The build before the migration ('{timeout.Command}') did not finish within " +
+                $"{ProcessTimeoutException.Describe(timeout.Timeout)} and was stopped. Nothing was changed. " +
+                "Give it more time with `buildTimeoutMinutes` in .eolup.yml, `--build-timeout`, or the Action's `build-timeout` input.",
+                timeout);
+        }
+
         if (!preflightBuild.Succeeded)
         {
             var combinedOutput = preflightBuild.StandardOutput + preflightBuild.StandardError;
@@ -223,7 +247,8 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         await CommitMigrationAsync(projectPath, changedFiles, targetTfm, cancellationToken);
 
         var assessment = await AssessAsync(
-            buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: true, cancellationToken);
+            buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: true,
+            timeouts, cancellationToken);
 
         // Only looked for when something already failed: it explains a failure, it never creates one.
         // And only in the projects this run moved — a project left on an older line on purpose
@@ -239,7 +264,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
             // on the untouched code can't be fixed by moving packages, so don't spend a retry on it.
             IReadOnlyList<(StalePackage Package, string NewVersion)> edited = [];
             var migrationBrokeIt = !assessment.Build.Succeeded || TestComparison.BlamesMigration(assessment.TestComparison);
-            if ((_bumpPackages || config.BumpPackages) && migrationBrokeIt)
+            if ((_options.BumpPackages || config.BumpPackages) && migrationBrokeIt)
             {
                 // Shared props files reach every project, so they are only edited when every project is being moved.
                 var bumpable = FrameworkAlignedPackages.LimitToBumpedProjects(
@@ -258,7 +283,8 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
                     // the framework change and nothing speculative. The baseline comparison isn't repeated: the
                     // untouched code's result can't have changed, and a dropped retry's comparison is discarded.
                     var retry = await AssessAsync(
-                        buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: false, cancellationToken);
+                        buildTarget, projectPath, testProjectExists, baselineMarkers, baseCommit, branchName, compareWithBaseline: false,
+                        timeouts, cancellationToken);
                     if (!retry.Failed)
                     {
                         assessment = retry;
@@ -284,7 +310,8 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
         return new RemediationOutcome(
             assessment.Build.Succeeded, testProjectExists, assessment.TestsPassed, assessment.ManualActionMarkers, branchName,
-            assessment.Coverage, assessment.TestComparison, frameworkAlignedPackages, packagesBumped, bumpDidNotHelp);
+            assessment.Coverage, assessment.TestComparison, frameworkAlignedPackages, packagesBumped, bumpDidNotHelp,
+            assessment.Unverifiable);
     }
 
     private static string DescribeBump((StalePackage Package, string NewVersion) bump) =>
@@ -333,17 +360,46 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
     }
 
     /// <summary>What one build-and-test pass of the migrated code showed.</summary>
+    /// <param name="Unverifiable">
+    /// Set when a step was stopped for taking too long: no answer exists, so nothing here can vouch for the change.
+    /// </param>
     private sealed record Assessment(
-        ProcessResult Build, IReadOnlyList<string> ManualActionMarkers, bool? TestsPassed, CoverageReport? Coverage, TestComparison? TestComparison)
+        ProcessResult Build, IReadOnlyList<string> ManualActionMarkers, bool? TestsPassed, CoverageReport? Coverage, TestComparison? TestComparison,
+        string? Unverifiable = null)
     {
-        public bool Failed => !Build.Succeeded || TestsPassed == false;
+        // A step that was stopped is neither a failure to explain nor one that moving packages could fix: there is no answer at all.
+        public bool Failed => Unverifiable is null && (!Build.Succeeded || TestsPassed == false);
     }
+
+    /// <summary>
+    /// Why a build or test step that was stopped for taking too long can't vouch for the change, and how to give
+    /// it more time. A slow but healthy run is indistinguishable from a hung one, so it is reported as exactly that
+    /// ("did not finish"), never as a pass or a failure.
+    /// </summary>
+    private static string Stopped(string step, ProcessTimeoutException timeout, string yamlKey, string flag, string actionInput) =>
+        $"The {step} did not finish within {ProcessTimeoutException.Describe(timeout.Timeout)} ('{timeout.Command}' was stopped), " +
+        $"so the change can't be verified. Give it more time with `{yamlKey}` in .eolup.yml, `{flag}`, or the Action's `{actionInput}` input.";
+
+    private static string BuildStopped(ProcessTimeoutException timeout) =>
+        Stopped("build", timeout, "buildTimeoutMinutes", "--build-timeout", "build-timeout");
+
+    private static string TestsStopped(ProcessTimeoutException timeout) =>
+        Stopped("test run", timeout, "testTimeoutMinutes", "--test-timeout", "test-timeout");
 
     private static async Task<Assessment> AssessAsync(
         string buildTarget, string projectPath, bool testProjectExists, HashSet<string> baselineMarkers,
-        string baseCommit, string branchName, bool compareWithBaseline, CancellationToken cancellationToken)
+        string baseCommit, string branchName, bool compareWithBaseline, Timeouts timeouts, CancellationToken cancellationToken)
     {
-        var buildResult = await ProcessRunner.RunAsync("dotnet", ["build", buildTarget], projectPath, cancellationToken);
+        ProcessResult buildResult;
+        try
+        {
+            buildResult = await ProcessRunner.RunAsync("dotnet", ["build", buildTarget], projectPath, timeouts.Build, cancellationToken);
+        }
+        catch (ProcessTimeoutException timeout)
+        {
+            return new Assessment(new ProcessResult(-1, timeout.PartialOutput, ""), [], null, null, null, BuildStopped(timeout));
+        }
+
         var manualActionMarkers = buildResult.Succeeded
             ? ExtractObsoleteWarnings(buildResult.StandardOutput)
                 .Where(m => !baselineMarkers.Contains(NormalizeForComparison(m)))
@@ -361,7 +417,16 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
             // default xunit/nunit/mstest templates do); without it `dotnet test`
             // just warns and writes nothing, and coverage stays null = "not
             // measured", which the scorer reports rather than hides.
-            var run = await RunTestsAsync(buildTarget, projectPath, collectCoverage: true, cancellationToken);
+            TestRun run;
+            try
+            {
+                run = await RunTestsAsync(buildTarget, projectPath, collectCoverage: true, timeouts.Test, cancellationToken);
+            }
+            catch (ProcessTimeoutException timeout)
+            {
+                return new Assessment(buildResult, manualActionMarkers, null, null, null, TestsStopped(timeout));
+            }
+
             try
             {
                 testsPassed = Outcome(run);
@@ -377,14 +442,14 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
                 // measured" — a measurement problem must not become a verdict.
                 if (testsPassed == false)
                 {
-                    using var plain = await RunTestsAsync(buildTarget, projectPath, collectCoverage: false, cancellationToken);
+                    using var plain = await RunTestsAsync(buildTarget, projectPath, collectCoverage: false, timeouts.Test, cancellationToken);
                     testsPassed = Outcome(plain);
 
                     // Still failing: find out whether it was already failing before
                     // the migration touched anything.
                     if (testsPassed == false && compareWithBaseline)
                         testComparison = await CompareWithBaselineAsync(
-                            plain, baseCommit, branchName, buildTarget, projectPath, cancellationToken);
+                            plain, baseCommit, branchName, buildTarget, projectPath, timeouts, cancellationToken);
                 }
                 else if (testsPassed == true)
                 {
@@ -393,6 +458,11 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
                         .ToList();
                     coverage = CoberturaParser.Merge(CoverageFiles(run), projectPath, testProjectDirectories);
                 }
+            }
+            catch (ProcessTimeoutException timeout)
+            {
+                // The confirming run without coverage ran out of time: still no answer.
+                return new Assessment(buildResult, manualActionMarkers, null, null, null, TestsStopped(timeout));
             }
             finally
             {
@@ -491,7 +561,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
     /// delete that directory.
     /// </summary>
     private static async Task<TestRun> RunTestsAsync(
-        string buildTarget, string projectPath, bool collectCoverage, CancellationToken cancellationToken)
+        string buildTarget, string projectPath, bool collectCoverage, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var resultsDirectory = Path.Combine(Path.GetTempPath(), "eolup-tests-" + Guid.NewGuid().ToString("N"));
         List<string> args = ["test", buildTarget, "--logger", "trx", "--results-directory", resultsDirectory];
@@ -500,7 +570,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
         try
         {
-            var result = await ProcessRunner.RunAsync("dotnet", args, projectPath, cancellationToken);
+            var result = await ProcessRunner.RunAsync("dotnet", args, projectPath, timeout, cancellationToken);
 
             var trxFiles = Directory.Exists(resultsDirectory)
                 ? Directory.GetFiles(resultsDirectory, "*.trx", SearchOption.AllDirectories)
@@ -529,7 +599,7 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
     /// </summary>
     private static async Task<TestComparison?> CompareWithBaselineAsync(
         TestRun migrated, string baseCommit, string branchName, string buildTarget, string projectPath,
-        CancellationToken cancellationToken)
+        Timeouts timeouts, CancellationToken cancellationToken)
     {
         if (baseCommit.Length == 0)
             return null;
@@ -541,7 +611,13 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         TestRun baseline;
         try
         {
-            baseline = await RunTestsAsync(buildTarget, projectPath, collectCoverage: false, cancellationToken);
+            baseline = await RunTestsAsync(buildTarget, projectPath, collectCoverage: false, timeouts.Test, cancellationToken);
+        }
+        catch (ProcessTimeoutException)
+        {
+            // The untouched code's suite didn't finish in time either, so there is nothing to compare against
+            // (the finally below still puts the branch back).
+            return null;
         }
         finally
         {

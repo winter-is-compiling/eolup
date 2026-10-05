@@ -38,6 +38,33 @@ public class EolupConfigTests
         Assert.True(LoadYaml("bumpPackages: true\n").BumpPackages);
     }
 
+    [Fact]
+    public void Timeouts_DefaultTo30MinutesForBuildsAnd60ForTests_AndAreReadFromTheirKeys()
+    {
+        var defaults = LoadYaml(null);
+        Assert.Equal(30, defaults.BuildTimeoutMinutes);
+        Assert.Equal(60, defaults.TestTimeoutMinutes);
+
+        var set = LoadYaml("buildTimeoutMinutes: 45\ntestTimeoutMinutes: 120\n");
+        Assert.Equal(45, set.BuildTimeoutMinutes);
+        Assert.Equal(120, set.TestTimeoutMinutes);
+
+        // One key at a time: the other keeps its default.
+        Assert.Equal(60, LoadYaml("buildTimeoutMinutes: 45\n").TestTimeoutMinutes);
+    }
+
+    [Theory]
+    [InlineData("buildTimeoutMinutes: 0\n", "buildTimeoutMinutes")]
+    [InlineData("testTimeoutMinutes: -5\n", "testTimeoutMinutes")]
+    public void ATimeoutBelowOneMinute_IsRefusedWithTheKeyNamed(string yaml, string key)
+    {
+        // A zero limit would stop every build or test run the moment it starts.
+        var error = Assert.Throws<EolupUserException>(() => LoadYaml(yaml));
+
+        Assert.Contains(key, error.Message);
+        Assert.Contains(".eolup.yml", error.Message);
+    }
+
     private static EolupConfig LoadFiles(params (string Name, string Yaml)[] files)
     {
         var dir = Directory.CreateTempSubdirectory("eolup-config-").FullName;
