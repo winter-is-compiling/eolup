@@ -150,6 +150,42 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task TestProjectSwitchedOffInTheSolutionBuild_IsBlocked_NotACrash()
+    {
+        // Found by validating v0.3.0 on netch: the test project is in the solution but its build is switched
+        // off, so `dotnet test <solution>` exits 0, runs nothing and never creates its results directory.
+        // Remediate crashed with a DirectoryNotFoundException, and merely guarding that would have produced a
+        // HighConfidence verdict ("line coverage was not measured") for a migration no test ever ran against.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-tests-excluded-from-build");
+        var path = fixture.Path;
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.True(result.BuildSucceeded);
+        Assert.True(result.TestProjectExists);
+        Assert.Null(result.TestsPassed);
+        Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
+    }
+
+    [Fact]
+    public async Task TestProjectWithNoTests_IsBlocked_BecauseNothingRan()
+    {
+        // `dotnet test` on a test project that contains no test exits 0 ("No test is available") and writes an
+        // empty results file. Nothing vouches for the migration, so it can't be better than Blocked, and the
+        // reason must say that no test ran, not that tests "passed".
+        using var fixture = FixtureHarness.CopyToTemp("fixture-test-project-without-tests");
+        var path = fixture.Path;
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.True(result.BuildSucceeded);
+        Assert.Null(result.TestsPassed);
+        Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
+    }
+
+    [Fact]
     public async Task TestProjectWithoutACoverageCollector_StaysHighConfidence_ButSaysCoverageWasNotMeasured()
     {
         // Plenty of real repos don't reference coverlet.collector. Coverage can't
@@ -275,6 +311,57 @@ public class FixtureVerdictTests
         Assert.Contains("src/SampleLib/SampleLib.csproj", await ChangedFilesInMigrationCommit(path));
         Assert.Contains("<TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>",
             await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleLib", "SampleLib.csproj")));
+    }
+
+    [Fact]
+    public async Task SingleEntryTargetFrameworksLists_AreMigrated_AndStayPlural()
+    {
+        // Found by validating v0.3.0 on Prowlarr (all 25 projects), MonoGame and workflow-core: a project
+        // that lists ONE framework in the plural <TargetFrameworks> crashed remediate after the branch was
+        // created, because the writer looked only for the singular element. The writer now follows what
+        // the file spells, so every project keeps the form it was written in and the diff is one line per file.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-single-entry-target-frameworks");
+        var path = fixture.Path;
+
+        var scan = await CreateEngine().ScanAsync(path);
+        Assert.Equal("net8.0", scan.CurrentVersion);
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.HighConfidence, result.Verdict);
+        Assert.Equal(
+            ["src/SampleApp.Tests/SampleApp.Tests.csproj", "src/SampleApp/SampleApp.csproj", "src/SampleLib/SampleLib.csproj"],
+            await ChangedFilesInMigrationCommit(path));
+        Assert.Contains("<TargetFrameworks>net10.0</TargetFrameworks>",
+            await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleLib", "SampleLib.csproj")));
+        Assert.Contains("<TargetFrameworks>net10.0</TargetFrameworks>",
+            await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleApp.Tests", "SampleApp.Tests.csproj")));
+        Assert.Contains("<TargetFramework>net10.0</TargetFramework>",
+            await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleApp", "SampleApp.csproj")));
+
+        // Surgical: exactly one line changed in each file.
+        var numstat = (await Git(path, "diff", "--numstat", "HEAD~1", "HEAD")).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(3, numstat.Length);
+        Assert.All(numstat, line => Assert.StartsWith("1\t1\t", line.Trim()));
+    }
+
+    [Fact]
+    public async Task FrameworkSetByAnImport_StopsBeforeAnyBranchOrEdit()
+    {
+        // A framework declared in a file Eolup doesn't edit (here an explicit <Import>: neither the project
+        // nor a Directory.Build.props) can't be rewritten. That used to surface as a raw exception after the
+        // preflight build and after the branch was created; it must be a clear message before anything happens.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-framework-from-import");
+        var path = fixture.Path;
+        var before = await Git(path, "rev-parse", "HEAD");
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => CreateEngine().RemediateAsync(path));
+
+        Assert.Contains("SampleApp", error.Message);
+        Assert.Contains("Nothing was changed", error.Message);
+        Assert.Equal("", await Git(path, "branch", "--list", "eolup/*"));
+        Assert.Equal("", await Git(path, "status", "--porcelain"));
+        Assert.Equal(before, await Git(path, "rev-parse", "HEAD"));
     }
 
     [Fact]

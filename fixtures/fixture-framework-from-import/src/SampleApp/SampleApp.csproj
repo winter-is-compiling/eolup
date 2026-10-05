@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The target framework is set by this imported file, not by the project itself and not by a
+       Directory.Build.props, so there is no declaration here for Eolup to rewrite. -->
+  <Import Project="../../build/framework.props" />
+
+  <PropertyGroup>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -39,6 +39,37 @@ public class ConfidenceScorerTests
     }
 
     [Fact]
+    public void TestCommandThatRanNoTests_IsBlocked_NotHighConfidence()
+    {
+        // `dotnet test` can succeed without running anything (a test project switched off in the solution
+        // build, or one with no tests in it). testsPassed is null then: nothing passed, so nothing vouches
+        // for the change, and the verdict must not claim that "existing tests passed".
+        var result = ConfidenceScorer.Score(
+            buildSucceeded: true, testProjectExists: true, testsPassed: null,
+            manualActionMarkers: [], branchName: "b");
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
+        Assert.DoesNotContain(result.Reasons, r => r.Contains("tests passed"));
+    }
+
+    [Fact]
+    public void TestCommandThatRanNoTests_IsReportedAsThat_NotAsZeroCoverage()
+    {
+        // A project with no tests still gets instrumented, so a coverage report with nothing covered can
+        // exist. The honest reason is that no test ran, not that "tests passed" and covered no line.
+        var coverage = new CoverageReport([new FileCoverage("A.cs", 0, 10)]);
+
+        var result = ConfidenceScorer.Score(
+            buildSucceeded: true, testProjectExists: true, testsPassed: null,
+            manualActionMarkers: [], branchName: "b", coverage);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
+        Assert.DoesNotContain(result.Reasons, r => r.Contains("none of the"));
+    }
+
+    [Fact]
     public void ManualActionMarkersPresent_IsNeedsReview()
     {
         var result = ConfidenceScorer.Score(
