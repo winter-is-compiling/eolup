@@ -278,6 +278,57 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task SingleEntryTargetFrameworksLists_AreMigrated_AndStayPlural()
+    {
+        // Found by validating v0.3.0 on Prowlarr (all 25 projects), MonoGame and workflow-core: a project
+        // that lists ONE framework in the plural <TargetFrameworks> crashed remediate after the branch was
+        // created, because the writer looked only for the singular element. The writer now follows what
+        // the file spells, so every project keeps the form it was written in and the diff is one line per file.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-single-entry-target-frameworks");
+        var path = fixture.Path;
+
+        var scan = await CreateEngine().ScanAsync(path);
+        Assert.Equal("net8.0", scan.CurrentVersion);
+
+        var result = await CreateEngine().RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.HighConfidence, result.Verdict);
+        Assert.Equal(
+            ["src/SampleApp.Tests/SampleApp.Tests.csproj", "src/SampleApp/SampleApp.csproj", "src/SampleLib/SampleLib.csproj"],
+            await ChangedFilesInMigrationCommit(path));
+        Assert.Contains("<TargetFrameworks>net10.0</TargetFrameworks>",
+            await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleLib", "SampleLib.csproj")));
+        Assert.Contains("<TargetFrameworks>net10.0</TargetFrameworks>",
+            await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleApp.Tests", "SampleApp.Tests.csproj")));
+        Assert.Contains("<TargetFramework>net10.0</TargetFramework>",
+            await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleApp", "SampleApp.csproj")));
+
+        // Surgical: exactly one line changed in each file.
+        var numstat = (await Git(path, "diff", "--numstat", "HEAD~1", "HEAD")).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(3, numstat.Length);
+        Assert.All(numstat, line => Assert.StartsWith("1\t1\t", line.Trim()));
+    }
+
+    [Fact]
+    public async Task FrameworkSetByAnImport_StopsBeforeAnyBranchOrEdit()
+    {
+        // A framework declared in a file Eolup doesn't edit (here an explicit <Import>: neither the project
+        // nor a Directory.Build.props) can't be rewritten. That used to surface as a raw exception after the
+        // preflight build and after the branch was created; it must be a clear message before anything happens.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-framework-from-import");
+        var path = fixture.Path;
+        var before = await Git(path, "rev-parse", "HEAD");
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => CreateEngine().RemediateAsync(path));
+
+        Assert.Contains("SampleApp", error.Message);
+        Assert.Contains("Nothing was changed", error.Message);
+        Assert.Equal("", await Git(path, "branch", "--list", "eolup/*"));
+        Assert.Equal("", await Git(path, "status", "--porcelain"));
+        Assert.Equal(before, await Git(path, "rev-parse", "HEAD"));
+    }
+
+    [Fact]
     public async Task Chain_TakesEachHighConfidenceHop_AndStopsAtTheFirstThatIsNot()
     {
         // Chaining, end to end on real dotnet/git: net6.0 -> net8.0 is clean, and
