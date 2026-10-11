@@ -57,24 +57,53 @@ public sealed class EolupEngine(IEolClient eolClient, ILanguageProvider provider
         string projectPath, int maxHops = MaxChainHops, CancellationToken cancellationToken = default)
     {
         projectPath = Path.GetFullPath(projectPath);
+
+        // Where the user's checkout is before anything happens: a run that fails puts it back here, whichever
+        // hop it fails in (each hop leaves the checkout on its own branch, so the provider alone would only go
+        // back to the previous hop's).
+        var startedOn = await provider.CaptureCheckoutAsync(projectPath, cancellationToken);
         var hops = new List<RemediationHop>();
 
-        while (hops.Count < Math.Max(1, maxHops))
+        try
         {
-            // Re-scanned every hop: the previous hop's commit is checked out, so
-            // detection sees the versions it produced.
-            var scan = await ScanAsync(projectPath, cancellationToken);
-            if (hops.Count > 0 && scan.UpgradePath.Count == 0)
-                break; // destination reached
+            while (hops.Count < Math.Max(1, maxHops))
+            {
+                // Re-scanned every hop: the previous hop's commit is checked out, so
+                // detection sees the versions it produced.
+                var scan = await ScanAsync(projectPath, cancellationToken);
+                if (hops.Count > 0 && scan.UpgradePath.Count == 0)
+                    break; // destination reached
 
-            var result = await RemediateHopAsync(projectPath, scan, cancellationToken);
-            hops.Add(new RemediationHop(scan.CurrentVersion, scan.TargetDisplay, result));
+                var result = await RemediateHopAsync(projectPath, scan, cancellationToken);
+                hops.Add(new RemediationHop(scan.CurrentVersion, scan.TargetDisplay, result));
 
-            if (result.Verdict != ConfidenceVerdict.HighConfidence)
-                break; // never build further on a hop that needs a human
+                if (result.Verdict != ConfidenceVerdict.HighConfidence)
+                    break; // never build further on a hop that needs a human
+            }
+        }
+        catch (Exception failure) when (startedOn is not null)
+        {
+            var problem = await provider.RestoreCheckoutAsync(projectPath, startedOn);
+            if (failure is OperationCanceledException)
+                throw; // the user stopped it: put back quietly
+
+            // The steps that finished stay on their branches. Say so, because no pull request was opened for them.
+            var finished = hops.Select(h => h.Result.BranchName).OfType<string>().ToList();
+            if (finished.Count == 0 && problem is null)
+                throw; // a single hop: the provider's own message already says what it put back
+
+            var note = finished.Count == 0 ? "" :
+                $"The {(finished.Count == 1 ? "step that finished is" : "steps that finished are")} kept on " +
+                $"{string.Join(", ", finished.Select(CheckoutRef.Describe))}; no pull request was opened for {(finished.Count == 1 ? "it" : "them")}. ";
+            note += problem is null
+                ? $"Your checkout is back on {CheckoutRef.Describe(startedOn)}."
+                : $"Eolup could not put your checkout back on {CheckoutRef.Describe(startedOn)}: {problem}";
+
+            var what = failure is EolupUserException ? failure.Message : $"Unexpected {failure.GetType().Name}: {failure.Message}";
+            throw new EolupUserException($"{what}\n{note.TrimEnd()}", failure);
         }
 
-        return new ChainedRemediation(hops);
+        return new ChainedRemediation(hops, startedOn);
     }
 
     private async Task<RemediationResult> RemediateHopAsync(string projectPath, ScanResult scan, CancellationToken cancellationToken)
@@ -93,6 +122,7 @@ public sealed class EolupEngine(IEolClient eolClient, ILanguageProvider provider
             outcome.TestComparison,
             outcome.FrameworkAlignedPackages,
             outcome.PackagesBumped,
-            outcome.UnhelpfulPackageBumps);
+            outcome.UnhelpfulPackageBumps,
+            outcome.Unverifiable);
     }
 }

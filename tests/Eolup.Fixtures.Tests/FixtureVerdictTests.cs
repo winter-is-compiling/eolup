@@ -19,6 +19,9 @@ public class FixtureVerdictTests
     private static EolupEngine CreateEngine(bool bumpPackages = false) =>
         new(new RecordedEolClient(), new DotNetLanguageProvider(bumpPackages));
 
+    private static EolupEngine CreateEngine(DotNetProviderOptions options) =>
+        new(new RecordedEolClient(), new DotNetLanguageProvider(options));
+
     [Fact]
     public async Task Trivial_YieldsHighConfidence()
     {
@@ -167,6 +170,30 @@ public class FixtureVerdictTests
         Assert.Null(result.TestsPassed);
         Assert.Contains(result.Reasons, r => r.Contains("ran no tests"));
     }
+
+    [Fact]
+    public async Task ATestRunThatDoesNotFinishInTime_IsBlocked_AndLeavesItsResultsFolderBehindNowhere()
+    {
+        // Found by validating v0.3.0 on StackExchange.Redis, RestSharp and actions/runner: a fixed 5-minute
+        // limit killed legitimate test runs, the run ended in a crash-style error with no verdict, and the
+        // temp results folder leaked. A run stopped for taking too long now says exactly that, with the
+        // setting that gives it more time. The limit is scaled down to seconds here; the test sleeps for 10 minutes.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-test-that-never-finishes");
+        var path = fixture.Path;
+        var foldersBefore = ResultsFolders();
+
+        var result = await CreateEngine(new DotNetProviderOptions { TestTimeout = TimeSpan.FromSeconds(45) }).RemediateAsync(path);
+
+        Assert.Equal(ConfidenceVerdict.Blocked, result.Verdict);
+        Assert.True(result.BuildSucceeded);
+        var reason = Assert.Single(result.Reasons);
+        Assert.Contains("test run did not finish within 45 seconds", reason);
+        Assert.Contains("'dotnet test'", reason);
+        Assert.Contains("testTimeoutMinutes", reason);
+        Assert.Empty(ResultsFolders().Except(foldersBefore));
+    }
+
+    private static List<string> ResultsFolders() => Directory.GetDirectories(Path.GetTempPath(), "eolup-tests-*").ToList();
 
     [Fact]
     public async Task TestProjectWithNoTests_IsBlocked_BecauseNothingRan()
@@ -385,6 +412,106 @@ public class FixtureVerdictTests
         Assert.Contains("net8.0", await Git(path, "show", $"{publishable}:src/SampleApp/SampleApp.csproj"));
         // The stopped hop's branch builds on the published one by exactly its own commit.
         Assert.Equal("1", await Git(path, "rev-list", "--count", $"{publishable}..eolup/upgrade-to-10.0"));
+    }
+
+    // ------------------------------------------------------------------ a failed run puts the user's checkout back
+
+    private static async Task InstallHook(string repo, string name, string body)
+    {
+        var hook = Path.Combine(repo, ".git", "hooks", name);
+        await File.WriteAllTextAsync(hook, $"#!/bin/sh\n{body}\n");
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    [Fact]
+    public async Task ACommitRefusedByAHook_PutsTheCheckoutAndTheFilesBack_WithoutTouchingTheUsersOwnWork()
+    {
+        // Found by validating v0.3.0: any failure after the branch was created left the clone on eolup/upgrade-to-N,
+        // sometimes with edited, uncommitted project files (MonoGame: 10 of them). A commit hook refusing the
+        // migration commit is the most ordinary way to get there. The user's own uncommitted work, even inside the
+        // very project file that gets rewritten, must come back byte for byte: nothing here may use `reset --hard`.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var startBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        var before = await Git(path, "rev-parse", "HEAD");
+        await InstallHook(path, "pre-commit", "echo 'refused by the repo hook' >&2\nexit 1");
+
+        var greeter = Path.Combine(path, "src", "SampleApp", "Greeter.cs");
+        var project = Path.Combine(path, "src", "SampleApp", "SampleApp.csproj");
+        await File.AppendAllTextAsync(greeter, "// unrelated work in progress\n");
+        await File.AppendAllTextAsync(project, "<!-- my uncommitted note -->\n");
+        var greeterBefore = await File.ReadAllBytesAsync(greeter);
+        var projectBefore = await File.ReadAllBytesAsync(project);
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => CreateEngine().RemediateAsync(path));
+
+        Assert.Contains("Could not commit the migration", error.Message);
+        Assert.Contains($"put your checkout back on '{startBranch}'", error.Message);
+        Assert.Contains("held no commit, so it was removed", error.Message);
+        Assert.Equal(startBranch, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+        Assert.Equal(before, await Git(path, "rev-parse", "HEAD"));
+        Assert.Equal("", await Git(path, "branch", "--list", "eolup/*"));
+        Assert.Equal(greeterBefore, await File.ReadAllBytesAsync(greeter));
+        Assert.Equal(projectBefore, await File.ReadAllBytesAsync(project));
+        Assert.Equal(
+            ["M src/SampleApp/Greeter.cs", "M src/SampleApp/SampleApp.csproj"], // the user's two edits, and nothing else
+            (await Git(path, "status", "--porcelain", "--untracked-files=no")).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim()).Order());
+    }
+
+    [Fact]
+    public async Task AnUnexpectedFailureAfterTheMigrationCommit_KeepsTheBranch_NamesIt_AndPutsTheCheckoutBack()
+    {
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var startBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        var before = await Git(path, "rev-parse", "HEAD");
+        var provider = new DotNetLanguageProvider { AfterMigrationCommit = () => throw new InvalidOperationException("boom") };
+
+        var error = await Assert.ThrowsAsync<EolupUserException>(() => new EolupEngine(new RecordedEolClient(), provider).RemediateAsync(path));
+
+        Assert.Contains("Unexpected InvalidOperationException: boom", error.Message);
+        Assert.Contains($"put your checkout back on '{startBranch}'", error.Message);
+        Assert.Contains("committed on 'eolup/upgrade-to-10.0', which was kept", error.Message);
+        Assert.IsType<InvalidOperationException>(error.InnerException);
+        Assert.Equal(startBranch, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+        Assert.Equal(before, await Git(path, "rev-parse", startBranch)); // the user's branch is untouched
+        Assert.Equal("eolup/upgrade-to-10.0", await Git(path, "branch", "--list", "eolup/*"));
+        Assert.Equal("1", await Git(path, "rev-list", "--count", $"{before}..eolup/upgrade-to-10.0"));
+        Assert.Equal("", await Git(path, "status", "--porcelain", "--untracked-files=no"));
+        Assert.Contains("net8.0", await File.ReadAllTextAsync(Path.Combine(path, "src", "SampleApp", "SampleApp.csproj"))); // back on the old framework
+    }
+
+    [Fact]
+    public async Task ACancelledRun_PutsTheCheckoutBack_AndStaysACancellation()
+    {
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var startBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+        using var cancel = new CancellationTokenSource();
+        var provider = new DotNetLanguageProvider { AfterMigrationCommit = () => { cancel.Cancel(); return Task.CompletedTask; } };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => new EolupEngine(new RecordedEolClient(), provider).RemediateAsync(path, cancel.Token));
+
+        Assert.Equal(startBranch, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
+        Assert.Equal("eolup/upgrade-to-10.0", await Git(path, "branch", "--list", "eolup/*")); // it held the migration commit
+        Assert.Equal("", await Git(path, "status", "--porcelain", "--untracked-files=no"));
+    }
+
+    [Fact]
+    public async Task ACompletedRun_RecordsWhereItStarted_SoTheOutputCanSayHowToGoBack()
+    {
+        // A completed run leaves the checkout on the migration branch (whatever the verdict); the CLI says where it
+        // started and how to go back, from this.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-trivial");
+        var path = fixture.Path;
+        var startBranch = await Git(path, "rev-parse", "--abbrev-ref", "HEAD");
+
+        var run = await CreateEngine().RemediateChainAsync(path);
+
+        Assert.Equal(startBranch, run.StartedOn);
+        Assert.Equal(run.Final.Result.BranchName, await Git(path, "rev-parse", "--abbrev-ref", "HEAD"));
     }
 
     [Fact]

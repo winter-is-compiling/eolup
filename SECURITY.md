@@ -3,7 +3,7 @@
 Eolup shells out to `git`, `dotnet`, and (optionally) `gh` against your own repository, and can create branches and open pull requests. Taking that seriously:
 
 - Your source code never leaves your machine or CI runner — nothing is uploaded to any Eolup-operated service. See [ARCHITECTURE.md](ARCHITECTURE.md).
-- `remediate` always works on a new branch, never your current one, and only opens a PR on a `HighConfidence` verdict — nothing merges without your review.
+- `remediate` always works on a new branch, never your current one, and only opens a PR on a `HighConfidence` verdict — nothing merges without your review. If a run fails or is cancelled after the branch was created, Eolup puts your checkout and the files it edited back as they were (it never uses `git reset --hard` or `git clean`, so uncommitted work of your own is not touched) and tells you what it did.
 - The GitHub Action adapter ([action.yml](action.yml)) only uses ambient `gh`/GitHub Actions authentication already present in your workflow; it never embeds or requests credentials of its own.
 
 ## Reporting a vulnerability

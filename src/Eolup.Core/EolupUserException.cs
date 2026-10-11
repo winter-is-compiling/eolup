@@ -6,4 +6,14 @@ namespace Eolup.Core;
 /// instead of a raw stack trace. Anything else is a genuine bug and should still
 /// surface as a crash.
 /// </summary>
-public sealed class EolupUserException(string message) : Exception(message);
+public class EolupUserException : Exception
+{
+    public EolupUserException(string message) : base(message)
+    {
+    }
+
+    /// <param name="innerException">What actually went wrong, kept for whoever wants the detail.</param>
+    public EolupUserException(string message, Exception? innerException) : base(message, innerException)
+    {
+    }
+}

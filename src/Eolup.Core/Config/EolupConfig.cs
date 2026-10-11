@@ -42,5 +42,21 @@ public sealed class EolupConfig
     /// </summary>
     public int MinCoverage { get; set; } = 50;
 
+    /// <summary>
+    /// How long a restore or build may run before Eolup stops it. A repo's own build is the slowest thing Eolup
+    /// runs (large solutions take tens of minutes, more on a busy CI runner), and a limit that is too tight
+    /// turns a slow build into "can't verify". YAML key: `buildTimeoutMinutes`. The CLI's `--build-timeout` overrides it.
+    /// </summary>
+    public int BuildTimeoutMinutes { get; set; } = DefaultBuildTimeoutMinutes;
+
+    /// <summary>
+    /// How long the test run may take. A suite that exceeds it is reported as Blocked ("did not finish"), never as
+    /// passed or failed. YAML key: `testTimeoutMinutes`. The CLI's `--test-timeout` overrides it.
+    /// </summary>
+    public int TestTimeoutMinutes { get; set; } = DefaultTestTimeoutMinutes;
+
+    public const int DefaultBuildTimeoutMinutes = 30;
+    public const int DefaultTestTimeoutMinutes = 60;
+
     public static EolupConfig Default => new();
 }
