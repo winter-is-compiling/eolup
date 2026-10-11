@@ -138,7 +138,8 @@ public static class ProcessRunner
     /// </summary>
     internal static string Describe(string fileName, string? firstArgument)
     {
-        var program = Path.GetFileNameWithoutExtension(fileName);
+        // Both separators, whatever the OS: Path.* on Linux doesn't treat a backslash as one.
+        var program = Path.GetFileNameWithoutExtension(fileName[(fileName.LastIndexOfAny(['/', '\\']) + 1)..]);
         return firstArgument is { Length: > 0 and <= 24 } && firstArgument[0] is not ('-' or '/') && firstArgument.All(c => char.IsLetterOrDigit(c) || c == '-')
             ? $"{program} {firstArgument}"
             : program;
