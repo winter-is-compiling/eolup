@@ -229,6 +229,23 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task MicrosoftTestingPlatformRepo_IsJudgedByItsTests_NotBlockedByVsTestOnlyFlags()
+    {
+        // global.json selects Microsoft.Testing.Platform (xunit v3). `--logger trx` and `--collect` are
+        // VSTest options there: every test host exits 5 and the suite was reported as failing on the
+        // untouched code (Terminal.Gui, Giraffe). The suite passes with a plain `dotnet test`, so the
+        // verdict must follow that, with coverage reported as not measured.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-mtp-xunit-v3");
+
+        var result = await CreateEngine().RemediateAsync(fixture.Path);
+
+        Assert.Equal(ConfidenceVerdict.HighConfidence, result.Verdict);
+        Assert.True(result.TestsPassed);
+        Assert.Null(result.Coverage);
+        Assert.Contains(result.Reasons, r => r.Contains("line coverage was not measured"));
+    }
+
+    [Fact]
     public async Task Remediation_CommitsTheMigrationOntoItsBranch_TouchingOnlyProjectFiles()
     {
         // Found while checking the PR flow against a local bare remote: the
