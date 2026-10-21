@@ -110,6 +110,15 @@ internal static partial class CsProjHelper
             : WriteTargetFrameworks(bump.File, current, targetTfm);
 
     /// <summary>
+    /// The file <see cref="RewriteTargetFramework"/> will edit for this project (null when there is none), so a
+    /// caller can keep that file's original bytes before the first edit.
+    /// </summary>
+    public static string? DeclarationFileOf(VersionPlanning.ProjectBump bump) =>
+        DeclaresSingularTargetFramework(bump)
+            ? FindTargetFrameworkDeclarationFile(bump.File)
+            : FindTargetFrameworkDeclarationFile(bump.File, "<TargetFrameworks");
+
+    /// <summary>
     /// Only a project that evaluates to one entry can be a singular declaration: several entries are a list by
     /// definition. When the singular element is spelled out anywhere that applies (the project, or a shared
     /// props file above it), MSBuild builds a single target and ignores a plural element, so it is the one to edit.

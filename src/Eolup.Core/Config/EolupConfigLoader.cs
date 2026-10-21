@@ -35,6 +35,19 @@ public static class EolupConfigLoader
             return EolupConfig.Default;
 
         var config = Deserializer.Deserialize<EolupConfig>(yaml);
-        return config ?? EolupConfig.Default;
+        if (config is null)
+            return EolupConfig.Default;
+
+        // A zero or negative limit would stop every build or test run the moment it starts.
+        RequireAtLeastOneMinute(config.BuildTimeoutMinutes, "buildTimeoutMinutes", path);
+        RequireAtLeastOneMinute(config.TestTimeoutMinutes, "testTimeoutMinutes", path);
+        return config;
+    }
+
+    private static void RequireAtLeastOneMinute(int minutes, string key, string path)
+    {
+        if (minutes < 1)
+            throw new EolupUserException(
+                $"`{key}` in {Path.GetFileName(path)} must be at least 1 (a number of minutes), but it is {minutes}.");
     }
 }

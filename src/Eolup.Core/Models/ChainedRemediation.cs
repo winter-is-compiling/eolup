@@ -9,7 +9,11 @@ public sealed record RemediationHop(string From, string To, RemediationResult Re
 /// stops at the first that isn't, so the hops before <see cref="Final"/> are all
 /// HighConfidence and each builds on the previous one's branch.
 /// </summary>
-public sealed record ChainedRemediation(IReadOnlyList<RemediationHop> Hops)
+/// <param name="StartedOn">
+/// Where the user's checkout was (a branch, or a commit when detached) before the run, so the output can say how to go
+/// back: a completed run leaves the checkout on the last migration branch. Null when the provider didn't capture it.
+/// </param>
+public sealed record ChainedRemediation(IReadOnlyList<RemediationHop> Hops, string? StartedOn = null)
 {
     /// <summary>The last hop attempted — the one whose verdict ended the run.</summary>
     public RemediationHop Final => Hops[^1];
