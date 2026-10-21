@@ -627,7 +627,10 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
                 // measured" — a measurement problem must not become a verdict.
                 if (testsPassed == false)
                 {
-                    using var plain = await RunTestsAsync(buildTarget, projectPath, collectCoverage: false, timeouts.Test, cancellationToken);
+                    // A run that already was plain (Microsoft.Testing.Platform) has nothing to confirm.
+                    using var plain = run.Plain
+                        ? run
+                        : await RunTestsAsync(buildTarget, projectPath, collectCoverage: false, timeouts.Test, cancellationToken);
                     testsPassed = Outcome(plain);
 
                     // Still failing: find out whether it was already failing before
@@ -710,8 +713,11 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
     /// and null when it succeeded but ran no test at all — a test project switched off in the solution's
     /// build, or one that contains no tests — which says nothing about the migration. "Ran a test" means
     /// the TRX files hold a per-test result: the TRX logger writes one for every test that ran, passes included.
+    /// A plain run (Microsoft.Testing.Platform, which has no TRX here) is judged by its exit code alone: MTP
+    /// exits non-zero when no test was discovered (8) or fewer ran than expected (9), so 0 means tests ran and passed.
     /// </summary>
-    private static bool? Outcome(TestRun run) => !run.Succeeded ? false : run.AnyResults ? true : (bool?)null;
+    private static bool? Outcome(TestRun run) =>
+        !run.Succeeded ? false : run.Plain || run.AnyResults ? true : (bool?)null;
 
     /// <summary>
     /// The coverage reports a run left behind. The results directory only exists once something wrote into
@@ -723,9 +729,16 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
             : [];
 
     /// <summary>One `dotnet test` run: pass/fail, per-test failures, and where its result files are.</summary>
-    private sealed class TestRun(bool succeeded, bool anyResults, IReadOnlySet<string> failed, string resultsDirectory) : IDisposable
+    private sealed class TestRun(
+        bool succeeded, bool anyResults, IReadOnlySet<string> failed, string resultsDirectory, bool plain = false) : IDisposable
     {
         public bool Succeeded { get; } = succeeded;
+
+        /// <summary>
+        /// Run with no logger and no collector (Microsoft.Testing.Platform, or a VSTest-only option that was rejected):
+        /// there are no per-test results and no coverage, and the exit code alone decides pass or fail.
+        /// </summary>
+        public bool Plain { get; } = plain;
         public bool AnyResults { get; } = anyResults;
         public IReadOnlySet<string> Failed { get; } = failed;
         public string ResultsDirectory { get; } = resultsDirectory;
@@ -755,11 +768,22 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
 
         try
         {
+            // Microsoft.Testing.Platform does not understand the VSTest options above: every test host would
+            // exit 5 and a passing suite would read as failing. There the plain command decides, alone.
+            if (TestingPlatform.IsSelectedByGlobalJson(projectPath))
+                return await RunPlainAsync(buildTarget, projectPath, resultsDirectory, timeout, cancellationToken);
+
             var result = await ProcessRunner.RunAsync("dotnet", args, projectPath, timeout, cancellationToken);
 
             var trxFiles = Directory.Exists(resultsDirectory)
                 ? Directory.GetFiles(resultsDirectory, "*.trx", SearchOption.AllDirectories)
                 : [];
+
+            // The same symptom without a global.json to say so (MTP chosen in the project, or by an SDK default):
+            // exit code 5 and not one TRX file means the options were rejected, not that tests failed.
+            if (result.ExitCode == TestingPlatform.InvalidArgumentsExitCode && trxFiles.Length == 0)
+                return await RunPlainAsync(buildTarget, projectPath, resultsDirectory, timeout, cancellationToken);
+
             var (anyResults, failed) = TrxParser.Read(trxFiles);
             return new TestRun(result.Succeeded, anyResults, failed, resultsDirectory);
         }
@@ -770,6 +794,14 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
             TestRun.DeleteQuietly(resultsDirectory);
             throw;
         }
+    }
+
+    /// <summary>A plain `dotnet test` (no logger, no collector): see <see cref="TestRun.Plain"/>.</summary>
+    private static async Task<TestRun> RunPlainAsync(
+        string buildTarget, string projectPath, string resultsDirectory, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var result = await ProcessRunner.RunAsync("dotnet", ["test", buildTarget], projectPath, timeout, cancellationToken);
+        return new TestRun(result.Succeeded, anyResults: false, new HashSet<string>(), resultsDirectory, plain: true);
     }
 
     /// <summary>
