@@ -740,6 +740,13 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         /// </summary>
         public bool Plain { get; } = plain;
         public bool AnyResults { get; } = anyResults;
+
+        /// <summary>Test assemblies that started but never reported (a crashed host, a missing runtime), by name.</summary>
+        public IReadOnlyList<string> NotRun { get; init; } = [];
+
+        /// <summary>The console line that explains a crashed or aborted run ("... Test host process crashed"), or null.</summary>
+        public string? CrashText { get; init; }
+
         public IReadOnlySet<string> Failed { get; } = failed;
         public string ResultsDirectory { get; } = resultsDirectory;
 
@@ -785,7 +792,12 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
                 return await RunPlainAsync(buildTarget, projectPath, resultsDirectory, timeout, cancellationToken);
 
             var (anyResults, failed) = TrxParser.Read(trxFiles);
-            return new TestRun(result.Succeeded, anyResults, failed, resultsDirectory);
+            var console = result.StandardOutput + "\n" + result.StandardError;
+            return new TestRun(result.Succeeded, anyResults, failed, resultsDirectory)
+            {
+                NotRun = result.Succeeded ? [] : TestConsoleOutput.AssembliesThatDidNotReport(console),
+                CrashText = result.Succeeded ? null : TestConsoleOutput.CrashText(console),
+            };
         }
         catch
         {
@@ -848,7 +860,9 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
         using (baseline)
         {
             if (baseline.Succeeded)
-                return new TestComparison(BaselinePassed: true, [.. migrated.Failed], [], FailuresIdentified: migrated.AnyResults);
+                return new TestComparison(
+                    BaselinePassed: true, [.. migrated.Failed], [], FailuresIdentified: migrated.AnyResults,
+                    NotRun: migrated.NotRun, CrashText: migrated.CrashText);
 
             if (!baseline.AnyResults || !migrated.AnyResults)
                 return new TestComparison(BaselinePassed: false, [], [], FailuresIdentified: false);
@@ -857,7 +871,10 @@ public sealed partial class DotNetLanguageProvider : ILanguageProvider
                 BaselinePassed: false,
                 NewFailures: [.. migrated.Failed.Except(baseline.Failed).Order(StringComparer.Ordinal)],
                 AlreadyFailing: [.. migrated.Failed.Intersect(baseline.Failed).Order(StringComparer.Ordinal)],
-                FailuresIdentified: true);
+                FailuresIdentified: true,
+                NotRun: migrated.NotRun,
+                NotRunBefore: baseline.NotRun,
+                CrashText: migrated.CrashText);
         }
     }
 

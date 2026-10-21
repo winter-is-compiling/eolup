@@ -164,9 +164,10 @@ public static class ConfidenceScorer
 
         if (comparison.BaselinePassed)
             return result(ConfidenceVerdict.NeedsReview,
-                [comparison.FailuresIdentified && comparison.NewFailures.Count > 0
+                [(comparison.FailuresIdentified && comparison.NewFailures.Count > 0
                     ? $"The test suite passed before the migration and fails after it — a likely regression. Newly failing: {Names(comparison.NewFailures)}."
-                    : "The test suite passed before the migration and fails after it — a likely regression."]);
+                    : "The test suite passed before the migration and fails after it — a likely regression.")
+                 + NotRunSentence(comparison, " ")]);
 
         if (!comparison.FailuresIdentified)
             return result(ConfidenceVerdict.Blocked,
@@ -174,14 +175,57 @@ public static class ConfidenceScorer
                  "so it can't show whether the migration broke anything — cannot verify the change is safe."]);
 
         if (comparison.NewFailures.Count > 0)
+        {
+            List<string> reasons =
+                [$"{comparison.NewFailures.Count} test(s) that passed before the migration now fail — a likely regression: {Names(comparison.NewFailures)}."];
+            if (comparison.AlreadyFailing.Count > 0)
+                reasons.Add($"{comparison.AlreadyFailing.Count} other failing test(s) were already failing before the migration: {Names(comparison.AlreadyFailing)}.");
+            if (NotRunSentence(comparison, "") is { Length: > 0 } notRun)
+                reasons.Add(notRun);
+            return result(ConfidenceVerdict.NeedsReview, reasons);
+        }
+
+        // The run failed, yet no test is named as failing: some test project never got to report (its host crashed,
+        // or a runtime is missing), and the ones that did report passed. Saying "0 failing tests" would be untrue.
+        if (comparison.AlreadyFailing.Count == 0)
             return result(ConfidenceVerdict.NeedsReview,
-                [$"{comparison.NewFailures.Count} test(s) that passed before the migration now fail — a likely regression: {Names(comparison.NewFailures)}.",
-                 $"{comparison.AlreadyFailing.Count} other failing test(s) were already failing before the migration: {Names(comparison.AlreadyFailing)}."]);
+                [NotRunSentence(comparison, "", nothingElseFailed: true) is { Length: > 0 } sentence
+                    ? sentence
+                    : "The test run failed without reporting any failing test" + CrashSuffix(comparison.CrashText) +
+                      ": part of the suite could not run, so the migration can't be judged for it. The tests that did run passed."]);
 
         return result(ConfidenceVerdict.NeedsReview,
             [$"No test broke because of the migration: all {comparison.AlreadyFailing.Count} failing test(s) were already failing on the untouched code " +
              $"({Names(comparison.AlreadyFailing)}). Every other test passed, but those can't vouch for this change — worth a look."]);
     }
+
+    /// <summary>
+    /// What is known about test projects that never reported a result (a crashed host, a missing runtime): they ran
+    /// no tests, so they are neither passing nor failing. Empty when none is named. <paramref name="lead"/> separates it
+    /// from a sentence before it.
+    /// </summary>
+    private static string NotRunSentence(TestComparison comparison, string lead, bool nothingElseFailed = false)
+    {
+        if (comparison.NotRun is not { Count: > 0 } notRun)
+            return "";
+
+        var before = comparison.NotRunBefore ?? [];
+        var onlyNow = notRun.Except(before, StringComparer.OrdinalIgnoreCase).ToList();
+        var plural = notRun.Count > 1;
+        var tail = $" so {(plural ? "their" : "its")} tests could not be run" + CrashSuffix(comparison.CrashText) + ".";
+
+        // Reported before, silent now: the migration is the likely cause.
+        if (onlyNow.Count > 0)
+            return $"{lead}The test host of {Names(onlyNow)} did not report any result after the migration, though it did before — a likely regression;{tail}";
+
+        var baselineKnown = comparison.NotRunBefore is not null;
+        var sentence = $"{lead}The test host of {Names(notRun)} did not report any result{(baselineKnown ? " on the untouched code either" : "")};{tail}";
+        return nothingElseFailed
+            ? sentence + " The migration can't be judged for " + (plural ? "them" : "it") + ". The tests that did run passed."
+            : sentence;
+    }
+
+    private static string CrashSuffix(string? crashText) => string.IsNullOrWhiteSpace(crashText) ? "" : $" ({crashText.Trim()})";
 
     private static string Names(IReadOnlyList<string> tests) =>
         tests.Count <= FailedTestsToName

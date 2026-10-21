@@ -15,11 +15,21 @@ namespace Eolup.Core.Models;
 /// suite couldn't run far enough to report per-test outcomes (e.g. the test host
 /// failed to start), in which case the two lists are empty and mean nothing.
 /// </param>
+/// <param name="NotRun">
+/// Test projects that never reported a result after the migration (their test host crashed or could not start),
+/// by name. Not the same as failing tests: nothing in them ran. Empty when every project reported, or when the
+/// console output named none.
+/// </param>
+/// <param name="NotRunBefore">The same list for the untouched code, to tell "crashes either way" from "crashes only now".</param>
+/// <param name="CrashText">The console line that explains a crashed or aborted run after the migration, if there was one.</param>
 public sealed record TestComparison(
     bool BaselinePassed,
     IReadOnlyList<string> NewFailures,
     IReadOnlyList<string> AlreadyFailing,
-    bool FailuresIdentified)
+    bool FailuresIdentified,
+    IReadOnlyList<string>? NotRun = null,
+    IReadOnlyList<string>? NotRunBefore = null,
+    string? CrashText = null)
 {
     /// <summary>
     /// Whether a failing suite should be blamed on the migration: no comparison could be made (so assume
