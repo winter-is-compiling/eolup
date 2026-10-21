@@ -246,6 +246,26 @@ public class FixtureVerdictTests
     }
 
     [Fact]
+    public async Task ATestProjectWhoseHostCrashes_IsNamed_NotReportedAsZeroFailingTests()
+    {
+        // CrashTests exits the test host as soon as its assembly loads, on the untouched code too; GoodTests
+        // passes. The old wording was "all 0 failing test(s) were already failing on the untouched code ()...
+        // Every other test passed", which says nothing true about the project that never ran.
+        using var fixture = FixtureHarness.CopyToTemp("fixture-test-host-crash");
+
+        var result = await CreateEngine().RemediateAsync(fixture.Path);
+
+        Assert.Equal(ConfidenceVerdict.NeedsReview, result.Verdict);
+        var reason = Assert.Single(result.Reasons);
+        Assert.Contains("CrashTests", reason);
+        Assert.Contains("Test host process crashed", reason);
+        Assert.DoesNotContain("GoodTests", reason); // it ran and passed: nothing to say about it
+        Assert.DoesNotContain("0 failing", reason);
+        Assert.DoesNotContain("()", reason);
+        Assert.DoesNotContain("Every other test passed", reason);
+    }
+
+    [Fact]
     public async Task Remediation_CommitsTheMigrationOntoItsBranch_TouchingOnlyProjectFiles()
     {
         // Found while checking the PR flow against a local bare remote: the
